@@ -1,4 +1,5 @@
 UV_BIN ?= $(HOME)/.local/bin/uv
+PYTHON_VERSION ?= 3.13
 SERVICE_USER ?= $(shell id -un)
 SERVICE_GROUP ?= $(shell id -gn)
 STATE_DIR ?= /var/lib/commuter
@@ -13,7 +14,7 @@ PROJECT_ROOT := $(realpath $(CURDIR))
 # It never replaces the encrypted database, Fernet key, or populated env file.
 install:
 	test -x "$(UV_BIN)"
-	"$(UV_BIN)" sync --frozen --no-dev
+	"$(UV_BIN)" sync --frozen --no-dev --python "$(PYTHON_VERSION)"
 	sudo install -d -o "$(SERVICE_USER)" -g "$(SERVICE_GROUP)" -m 0700 "$(STATE_DIR)"
 	sudo chown -R "$(SERVICE_USER):$(SERVICE_GROUP)" "$(STATE_DIR)"
 	sudo install -d -o root -g "$(SERVICE_GROUP)" -m 0750 "$(CONFIG_DIR)"

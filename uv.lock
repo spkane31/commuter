@@ -1,6 +1,10 @@
 version = 1
 revision = 3
 requires-python = ">=3.11"
+resolution-markers = [
+    "platform_machine == 'armv7l' and sys_platform == 'linux'",
+    "platform_machine != 'armv7l' or sys_platform != 'linux'",
+]
 
 [[package]]
 name = "annotated-doc"
@@ -44,8 +48,26 @@ wheels = [
 
 [[package]]
 name = "cffi"
+version = "2.0.0"
+source = { registry = "https://www.piwheels.org/simple" }
+resolution-markers = [
+    "platform_machine == 'armv7l' and sys_platform == 'linux'",
+]
+dependencies = [
+    { name = "pycparser", marker = "implementation_name != 'PyPy'" },
+]
+wheels = [
+    { url = "https://www.piwheels.org/simple/cffi/cffi-2.0.0-cp311-cp311-linux_armv7l.whl", hash = "sha256:004123cb9fc6283fc343c5932fe2adf51696f0fc88cf56f61b96a7565d7cf2c7" },
+    { url = "https://www.piwheels.org/simple/cffi/cffi-2.0.0-cp313-cp313-linux_armv7l.whl", hash = "sha256:72799e55e1333fa8b1f801cbf509586553180eaa87afb53c0d841901d19d053b" },
+]
+
+[[package]]
+name = "cffi"
 version = "2.1.1"
 source = { registry = "https://pypi.org/simple" }
+resolution-markers = [
+    "platform_machine != 'armv7l' or sys_platform != 'linux'",
+]
 dependencies = [
     { name = "pycparser", marker = "implementation_name != 'PyPy'" },
 ]
@@ -163,7 +185,9 @@ name = "commuter"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
-    { name = "cryptography" },
+    { name = "cffi", version = "2.0.0", source = { registry = "https://www.piwheels.org/simple" }, marker = "platform_machine == 'armv7l' and sys_platform == 'linux'" },
+    { name = "cryptography", version = "45.0.7", source = { registry = "https://pypi.org/simple" }, marker = "platform_machine != 'armv7l' or sys_platform != 'linux'" },
+    { name = "cryptography", version = "45.0.7", source = { registry = "https://www.piwheels.org/simple" }, marker = "platform_machine == 'armv7l' and sys_platform == 'linux'" },
     { name = "fastapi" },
     { name = "httpx" },
     { name = "uvicorn" },
@@ -177,7 +201,9 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "cryptography", specifier = ">=43,<46" },
+    { name = "cffi", marker = "platform_machine == 'armv7l' and sys_platform == 'linux'", specifier = ">=1.17,<2.1", index = "https://www.piwheels.org/simple" },
+    { name = "cryptography", marker = "platform_machine != 'armv7l' or sys_platform != 'linux'", specifier = ">=43,<46" },
+    { name = "cryptography", marker = "platform_machine == 'armv7l' and sys_platform == 'linux'", specifier = ">=43,<46", index = "https://www.piwheels.org/simple" },
     { name = "fastapi", specifier = ">=0.115,<1" },
     { name = "httpx", specifier = ">=0.27,<1" },
     { name = "uvicorn", specifier = ">=0.30,<1" },
@@ -193,8 +219,11 @@ dev = [
 name = "cryptography"
 version = "45.0.7"
 source = { registry = "https://pypi.org/simple" }
+resolution-markers = [
+    "platform_machine != 'armv7l' or sys_platform != 'linux'",
+]
 dependencies = [
-    { name = "cffi", marker = "platform_python_implementation != 'PyPy'" },
+    { name = "cffi", version = "2.1.1", source = { registry = "https://pypi.org/simple" }, marker = "platform_python_implementation != 'PyPy'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/a7/35/c495bffc2056f2dadb32434f1feedd79abde2a7f8363e1974afa9c33c7e2/cryptography-45.0.7.tar.gz", hash = "sha256:4b1654dfc64ea479c242508eb8c724044f1e964a47d1d1cacc5132292d851971", size = 744980, upload-time = "2025-09-01T11:15:03.146Z" }
 wheels = [
@@ -228,6 +257,20 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/1c/c5/8c59d6b7c7b439ba4fc8d0cab868027fd095f215031bc123c3a070962912/cryptography-45.0.7-pp311-pypy311_pp73-manylinux_2_34_aarch64.whl", hash = "sha256:2f641b64acc00811da98df63df7d59fd4706c0df449da71cb7ac39a0732b40ae", size = 4149023, upload-time = "2025-09-01T11:14:55.022Z" },
     { url = "https://files.pythonhosted.org/packages/55/32/05385c86d6ca9ab0b4d5bb442d2e3d85e727939a11f3e163fc776ce5eb40/cryptography-45.0.7-pp311-pypy311_pp73-manylinux_2_34_x86_64.whl", hash = "sha256:f5414a788ecc6ee6bc58560e85ca624258a55ca434884445440a810796ea0e0b", size = 4385722, upload-time = "2025-09-01T11:14:57.319Z" },
     { url = "https://files.pythonhosted.org/packages/23/87/7ce86f3fa14bc11a5a48c30d8103c26e09b6465f8d8e9d74cf7a0714f043/cryptography-45.0.7-pp311-pypy311_pp73-win_amd64.whl", hash = "sha256:1f3d56f73595376f4244646dd5c5870c14c196949807be39e79e7bd9bac3da63", size = 3332908, upload-time = "2025-09-01T11:14:58.78Z" },
+]
+
+[[package]]
+name = "cryptography"
+version = "45.0.7"
+source = { registry = "https://www.piwheels.org/simple" }
+resolution-markers = [
+    "platform_machine == 'armv7l' and sys_platform == 'linux'",
+]
+dependencies = [
+    { name = "cffi", version = "2.0.0", source = { registry = "https://www.piwheels.org/simple" }, marker = "platform_python_implementation != 'PyPy'" },
+]
+wheels = [
+    { url = "https://www.piwheels.org/simple/cryptography/cryptography-45.0.7-cp313-abi3-linux_armv7l.whl", hash = "sha256:20129018d7de7c26b4627f02eea4fdf69053591285a21c82955a95bbcdfdd170" },
 ]
 
 [[package]]

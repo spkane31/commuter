@@ -5,11 +5,21 @@ description = "Personal Strava commuter automation service"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+  "cffi>=1.17,<2.1; sys_platform == 'linux' and platform_machine == 'armv7l'",
   "cryptography>=43,<46",
   "fastapi>=0.115,<1",
   "httpx>=0.27,<1",
   "uvicorn>=0.30,<1",
 ]
+
+[tool.uv.sources]
+cryptography = { index = "piwheels", marker = "sys_platform == 'linux' and platform_machine == 'armv7l'" }
+cffi = { index = "piwheels", marker = "sys_platform == 'linux' and platform_machine == 'armv7l'" }
+
+[[tool.uv.index]]
+name = "piwheels"
+url = "https://www.piwheels.org/simple"
+explicit = true
 
 [dependency-groups]
 dev = [

@@ -1,7 +1,34 @@
-.env
-.local
+# Python bytecode and build output
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+build/
+dist/
+*.egg-info/
+
+# Virtual environments
 .venv/
+venv/
+env/
+ENV/
+
+# Test, coverage, lint, and type-checker caches
 .pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.mypy_cache/
+.pyre/
+.pytype/
+.ruff_cache/
+
+# Editor and notebook state
+.ipynb_checkpoints/
+.local/
+
+# Local Commuter configuration and encrypted state
+.env
 .commuter.key
 commuter.db
 commuter.db-shm

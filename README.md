@@ -153,7 +153,9 @@ and runs them as the user that invokes the command. It stores mutable state in
 service to `127.0.0.1`, so it does not expose a port to the LAN or internet.
 
 On Raspberry Pi OS or another Debian-based system, install `uv`, then run the
-target from the checkout's actual location:
+target from the checkout's actual location. The target installs Python 3.13 so
+the 32-bit ARM build can use compatible PiWheels packages instead of compiling
+native cryptography dependencies:
 
 ```sh
 curl -LsSf https://astral.sh/uv/install.sh | sh
