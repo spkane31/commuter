@@ -1,0 +1,20 @@
+[Unit]
+Description=Commuter Strava ride poller
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=commuter
+Group=commuter
+WorkingDirectory=/opt/commuter
+EnvironmentFile=/etc/commuter/commuter.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/commuter/.venv/bin/commuter sync
+TimeoutStartSec=2min
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/commuter
