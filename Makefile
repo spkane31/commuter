@@ -27,6 +27,7 @@ install:
 	sed -e 's|__COMMUTER_PROJECT_ROOT__|$(PROJECT_ROOT)|g' -e 's|__COMMUTER_SERVICE_USER__|$(SERVICE_USER)|g' -e 's|__COMMUTER_SERVICE_GROUP__|$(SERVICE_GROUP)|g' deploy/systemd/commuter-sync.service | sudo tee "$(SYSTEMD_DIR)/commuter-sync.service" >/dev/null
 	sudo install -m 0644 deploy/systemd/commuter-sync.timer "$(SYSTEMD_DIR)/commuter-sync.timer"
 	sudo systemctl daemon-reload
-	sudo systemctl enable --now commuter-sync.timer
+	sudo systemctl enable commuter-sync.timer
+	sudo systemctl start commuter-sync.timer
 	sudo systemctl try-restart commuter-web.service
 	sudo systemctl try-restart commuter-sync.timer

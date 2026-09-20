@@ -168,7 +168,8 @@ that file, copy the encrypted database and key as described below, then run
 `make install` again. Enable the web service only when you need to use it:
 
 ```sh
-sudo systemctl enable --now commuter-web.service
+sudo systemctl enable commuter-web.service
+sudo systemctl start commuter-web.service
 sudo systemctl status commuter-web.service
 ```
 
@@ -251,7 +252,8 @@ After verifying one live update, enable the persistent 15-minute timer on the
 Pi:
 
 ```sh
-sudo systemctl enable --now commuter-sync.timer
+sudo systemctl enable commuter-sync.timer
+sudo systemctl start commuter-sync.timer
 sudo systemctl list-timers commuter-sync.timer
 sudo journalctl -u commuter-sync.service -f
 ```
