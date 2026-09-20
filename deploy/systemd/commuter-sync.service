@@ -5,16 +5,16 @@ After=network-online.target
 
 [Service]
 Type=oneshot
-User=commuter
-Group=commuter
-WorkingDirectory=/opt/commuter
+User=__COMMUTER_SERVICE_USER__
+Group=__COMMUTER_SERVICE_GROUP__
+WorkingDirectory=__COMMUTER_PROJECT_ROOT__
 EnvironmentFile=/etc/commuter/commuter.env
 Environment=PYTHONUNBUFFERED=1
-ExecStart=/opt/commuter/.venv/bin/commuter sync
+ExecStart=__COMMUTER_PROJECT_ROOT__/.venv/bin/commuter sync
 TimeoutStartSec=2min
 UMask=0077
 NoNewPrivileges=true
 PrivateTmp=true
-ProtectHome=true
+ProtectHome=read-only
 ProtectSystem=strict
 ReadWritePaths=/var/lib/commuter

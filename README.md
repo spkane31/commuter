@@ -147,34 +147,27 @@ available at `/privacy`, `/terms`, `/support`, and `/data-deletion`.
 
 ## Raspberry Pi web service
 
-`deploy/systemd/commuter-web.service` runs the current OAuth and local
-administration web service as an unprivileged `commuter` user. It binds to
-`127.0.0.1`, so it does not expose a port to the LAN or internet.
+`make install` generates systemd units for the path of the current checkout
+and runs them as the user that invokes the command. It stores mutable state in
+`/var/lib/commuter` and binds the optional OAuth/local-administration web
+service to `127.0.0.1`, so it does not expose a port to the LAN or internet.
 
-The unit assumes the checked-out project and virtual environment are at
-`/opt/commuter`, and stores mutable state only in `/var/lib/commuter`.
-On Raspberry Pi OS or another Debian-based system:
+On Raspberry Pi OS or another Debian-based system, install `uv`, then run the
+target from the checkout's actual location:
 
 ```sh
-sudo useradd --system --user-group --home-dir /var/lib/commuter --create-home --shell /usr/sbin/nologin commuter
-sudo install -d -o commuter -g commuter -m 0700 /var/lib/commuter
-sudo install -d -o root -g commuter -m 0750 /etc/commuter
-sudo install -m 0640 -o root -g commuter deploy/systemd/commuter.env.example /etc/commuter/commuter.env
-sudoedit /etc/commuter/commuter.env
-sudo install -m 0644 deploy/systemd/commuter-web.service /etc/systemd/system/commuter-web.service
-sudo install -m 0644 deploy/systemd/commuter-sync.service /etc/systemd/system/commuter-sync.service
-sudo install -m 0644 deploy/systemd/commuter-sync.timer /etc/systemd/system/commuter-sync.timer
-sudo systemctl daemon-reload
-sudo systemctl enable --now commuter-web.service
+curl -LsSf https://astral.sh/uv/install.sh | sh
+cd /path/to/commuter
+make install
 ```
 
-Before enabling it, ensure `/opt/commuter/.venv/bin/commuter` exists and the
-`commuter` user can read the project and virtual environment. Inspect startup
-and later errors with:
+The first invocation creates `/etc/commuter/commuter.env` and exits. Populate
+that file, copy the encrypted database and key as described below, then run
+`make install` again. Enable the web service only when you need to use it:
 
 ```sh
+sudo systemctl enable --now commuter-web.service
 sudo systemctl status commuter-web.service
-sudo journalctl -u commuter-web.service -f
 ```
 
 For OAuth or local administration from another computer, tunnel the service
@@ -267,25 +260,24 @@ not run overlapping `commuter sync` processes.
 
 ### Updating an installed Pi
 
-Copy the repository to `/opt/commuter` (or update that checkout with `git
-pull`), then SSH to the Pi and run the following from the repository root as
-the normal SSH user—not with `sudo`:
+Keep the repository checkout wherever is convenient (for example,
+`~/git/github.com/spkane31/commuter`), then SSH to the Pi and run the following
+from that checkout as the normal SSH user—not with `sudo`:
 
 ```sh
 make install
 ```
 
-On its first invocation, the target creates the `commuter` service user and
-state/configuration directories. If `/etc/commuter/commuter.env` does not
-exist, it creates the example and stops; populate the Strava and Discord
-settings, then run `make install` again. Before that second invocation, also
-copy the encrypted database and matching encryption key into
-`/var/lib/commuter` as shown below.
+On its first invocation, the target creates the state/configuration directories
+and an `/etc/commuter/commuter.env` template, then stops. Populate the Strava
+and Discord settings, copy the encrypted database and matching encryption key
+into `/var/lib/commuter` as shown below, then run `make install` again.
 
-On later updates, copy the changed files or run `git pull`, then run `make
-install` again. It synchronizes dependencies, installs updated systemd units,
-reloads systemd, and restarts the active web service/timer. It deliberately
-does not replace the encrypted database, encryption key, or populated
+On later updates, run `git pull` in that checkout, then run `make install`
+again. The target synchronizes dependencies, regenerates the units with that
+checkout's current absolute path, reloads systemd, and restarts the active web
+service/timer. It deliberately does not replace the encrypted database,
+encryption key, or populated
 `/etc/commuter/commuter.env`, preserving OAuth credentials, commute totals, and
 Discord configuration. The default `uv` path is `~/.local/bin/uv`; override it
 when necessary, for example `make install UV_BIN=/usr/local/bin/uv`.
