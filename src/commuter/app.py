@@ -24,10 +24,9 @@ def create_app(settings: Settings | None = None, strava_client: StravaClient | N
     """Create the local OAuth application with explicit dependency injection."""
 
     settings = settings or Settings.from_environment()
-    encryption_key = settings.load_or_create_encryption_key()
-    store = CredentialStore(settings.database_path, encryption_key)
+    store = CredentialStore(settings.database_path)
     strava_client = strava_client or StravaClient(settings)
-    session_codec = SessionCodec(encryption_key)
+    session_codec = SessionCodec(settings.strava_client_secret)
 
     app = FastAPI(title="Commuter", docs_url=None, redoc_url=None)
     app.state.settings = settings
@@ -148,7 +147,7 @@ def create_app(settings: Settings | None = None, strava_client: StravaClient | N
             "Privacy",
             """
             <h1>Privacy</h1>
-            <p>Commuter stores only the information needed to operate its local Strava connection: encrypted OAuth credentials and settings you enter.</p>
+            <p>Commuter stores only the information needed to operate its local Strava connection: OAuth credentials and settings you enter.</p>
             <p>When it updates a commute, Commuter sends the Strava activity link plus fuel-savings and CO₂-avoidance summaries to the owner-configured Discord channel.</p>
             <p>Activity data is processed for automation and must not be retained beyond the permitted short-lived window.</p>
             <p>You can disconnect Strava and request deletion through <a href="/data-deletion">data deletion</a>.</p>

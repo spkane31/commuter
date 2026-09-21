@@ -5,7 +5,6 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 import pytest
-from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 
 from commuter.app import create_app
@@ -48,7 +47,6 @@ def settings(tmp_path: Path) -> Settings:
         strava_client_id="12345",
         strava_client_secret="test-client-secret",
         database_path=tmp_path / "commuter.db",
-        encryption_key_path=tmp_path / "commuter.key",
         base_url="http://testserver",
     )
 
@@ -79,7 +77,7 @@ def begin_authorization(client: TestClient) -> str:
     return query["state"][0]
 
 
-def test_oauth_callback_persists_encrypted_credentials(
+def test_oauth_callback_persists_plaintext_credentials_with_owner_only_database_permissions(
     client: TestClient,
     settings: Settings,
     fake_strava: FakeStravaClient,
@@ -100,7 +98,7 @@ def test_oauth_callback_persists_encrypted_credentials(
     assert response.headers["location"] == "/"
     assert fake_strava.exchanged_code == "authorization-code"
 
-    store = CredentialStore(settings.database_path, settings.load_or_create_encryption_key())
+    store = CredentialStore(settings.database_path)
     account = store.get_account(123)
     assert account is not None
     assert account.access_token == "fresh-access-token"
@@ -108,8 +106,9 @@ def test_oauth_callback_persists_encrypted_credentials(
     assert account.scopes == {"activity:read_all", "activity:write"}
 
     database_bytes = settings.database_path.read_bytes()
-    assert b"fresh-access-token" not in database_bytes
-    assert b"fresh-refresh-token" not in database_bytes
+    assert b"fresh-access-token" in database_bytes
+    assert b"fresh-refresh-token" in database_bytes
+    assert settings.database_path.stat().st_mode & 0o777 == 0o600
 
 
 def test_oauth_callback_rejects_a_missing_or_mismatched_state(client: TestClient) -> None:
@@ -136,7 +135,6 @@ def test_authorization_canonicalizes_the_origin_before_setting_the_state_cookie(
         strava_client_id=settings.strava_client_id,
         strava_client_secret=settings.strava_client_secret,
         database_path=settings.database_path,
-        encryption_key_path=settings.encryption_key_path,
         base_url="http://127.0.0.1:8000",
     )
     app = create_app(settings=canonical_settings, strava_client=fake_strava)
@@ -204,7 +202,7 @@ async def test_expired_token_is_refreshed_and_rotated(
 ) -> None:
     from commuter.auth import TokenManager
 
-    store = CredentialStore(settings.database_path, Fernet.generate_key())
+    store = CredentialStore(settings.database_path)
     store.save_account(
         athlete=Athlete(id=123, username="commuter"),
         scopes={"activity:read_all", "activity:write"},

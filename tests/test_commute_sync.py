@@ -5,7 +5,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import pytest
-from cryptography.fernet import Fernet
 
 from commuter.commute import CommuteConfiguration, Coordinate, synchronize_commutes
 from commuter.models import ActivityProcessing, Athlete, TokenSet
@@ -95,7 +94,7 @@ class InspectingNotifier:
 
 @pytest.fixture
 def store(tmp_path: Path) -> CredentialStore:
-    store = CredentialStore(tmp_path / "commuter.db", Fernet.generate_key())
+    store = CredentialStore(tmp_path / "commuter.db")
     athlete = Athlete(id=123, username="commuter")
     store.save_account(
         athlete=athlete,

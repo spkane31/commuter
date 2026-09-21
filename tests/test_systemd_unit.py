@@ -18,9 +18,8 @@ def test_local_web_service_template_uses_the_installing_pi_user_and_checkout() -
     assert service["ExecStart"] == "__COMMUTER_PROJECT_ROOT__/.venv/bin/commuter"
     assert service["UMask"] == "0077"
     assert service["Restart"] == "on-failure"
-    assert service["ProtectSystem"] == "strict"
+    assert service["ProtectSystem"] == "true"
     assert service["ProtectHome"] == "read-only"
-    assert service["ReadWritePaths"] == "/var/lib/commuter"
 
     assert parser["Install"]["WantedBy"] == "multi-user.target"
 
@@ -42,9 +41,8 @@ def test_sync_timer_runs_the_local_poller_every_fifteen_minutes() -> None:
     assert service["EnvironmentFile"] == "/etc/commuter/commuter.env"
     assert service["ExecStart"] == "__COMMUTER_PROJECT_ROOT__/.venv/bin/commuter sync"
     assert service["UMask"] == "0077"
-    assert service["ProtectSystem"] == "strict"
+    assert service["ProtectSystem"] == "true"
     assert service["ProtectHome"] == "read-only"
-    assert service["ReadWritePaths"] == "/var/lib/commuter"
 
     timer = timer_parser["Timer"]
     assert timer["Unit"] == "commuter-sync.service"

@@ -16,7 +16,6 @@ def test_default_strava_api_base_url_uses_the_official_v3_endpoint(tmp_path: Pat
         strava_client_id="12345",
         strava_client_secret="test-client-secret",
         database_path=tmp_path / "commuter.db",
-        encryption_key_path=tmp_path / "commuter.key",
         base_url="http://127.0.0.1:8000",
     )
 
@@ -106,7 +105,6 @@ async def test_activity_client_lists_fetches_and_updates_the_authenticated_athle
         strava_client_id="12345",
         strava_client_secret="test-client-secret",
         database_path=tmp_path / "commuter.db",
-        encryption_key_path=tmp_path / "commuter.key",
         base_url="http://127.0.0.1:8000",
         strava_api_base_url="https://strava.test/api/v3",
     )
@@ -150,7 +148,6 @@ async def test_activity_client_reports_a_connectivity_error_without_request_deta
         strava_client_id="12345",
         strava_client_secret="test-client-secret",
         database_path=tmp_path / "commuter.db",
-        encryption_key_path=tmp_path / "commuter.key",
         base_url="http://127.0.0.1:8000",
     )
     monkeypatch.setattr(strava.httpx, "AsyncClient", lambda timeout: FailingHTTPClient())
@@ -167,7 +164,6 @@ async def test_activity_client_recommends_reconnecting_after_a_forbidden_respons
         strava_client_id="12345",
         strava_client_secret="test-client-secret",
         database_path=tmp_path / "commuter.db",
-        encryption_key_path=tmp_path / "commuter.key",
         base_url="http://127.0.0.1:8000",
     )
     monkeypatch.setattr(strava.httpx, "AsyncClient", lambda timeout: ForbiddenHTTPClient())
@@ -186,7 +182,6 @@ async def test_activity_client_retries_rate_limited_requests_after_retry_after_d
         strava_client_id="12345",
         strava_client_secret="test-client-secret",
         database_path=tmp_path / "commuter.db",
-        encryption_key_path=tmp_path / "commuter.key",
         base_url="http://127.0.0.1:8000",
     )
     http_client = RateLimitedHTTPClient()

@@ -5,8 +5,10 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import os
 import time
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from pathlib import Path
 
 import uvicorn
 
@@ -15,6 +17,7 @@ from commuter.auth import TokenManager
 from commuter.commute import CommuteConfigurationError, synchronize_commutes, validate_commute_configuration
 from commuter.config import Settings
 from commuter.discord import DiscordAPIError, DiscordNotifier
+from commuter.legacy_migration import LegacyMigrationError, migrate_legacy_encrypted_storage
 from commuter.models import CommuteConfiguration, Coordinate
 from commuter.store import CredentialStore
 from commuter.strava import StravaAPIError, StravaClient
@@ -31,6 +34,15 @@ def main() -> None:
         "--force-local",
         action="store_true",
         help="Remove local files without revoking Strava access when Strava is unavailable",
+    )
+    migrate_parser = subcommands.add_parser(
+        "migrate-plaintext-storage",
+        help="Convert the retired encrypted local database to plaintext",
+    )
+    migrate_parser.add_argument(
+        "--legacy-key-path",
+        type=str,
+        help="Path to the Fernet key used by the retired encrypted database",
     )
     configure_parser = subcommands.add_parser(
         "configure-commute",
@@ -85,6 +97,22 @@ def main() -> None:
             print(f"Revoked {result.revoked_connections} Strava connection(s) and removed local Commuter data.")
         return
 
+    if arguments.command == "migrate-plaintext-storage":
+        settings = Settings.from_environment()
+        key_path = arguments.legacy_key_path or os.environ.get(
+            "COMMUTER_ENCRYPTION_KEY_PATH",
+            str(settings.database_path.with_name(".commuter.key")),
+        )
+        try:
+            result = migrate_legacy_encrypted_storage(settings.database_path, Path(key_path))
+        except LegacyMigrationError as exc:
+            parser.error(str(exc))
+        print(
+            "Converted legacy encrypted storage to plaintext: "
+            f"accounts={result.accounts}, commute_configurations={result.commute_configurations}."
+        )
+        return
+
     if arguments.command == "configure-commute":
         _configure_commute(arguments, parser)
         return
@@ -100,7 +128,7 @@ def _configure_commute(arguments: argparse.Namespace, parser: argparse.ArgumentP
     """Persist a single owner-supplied Home-to-Work configuration."""
 
     settings = Settings.from_environment()
-    store = CredentialStore(settings.database_path, settings.load_or_create_encryption_key())
+    store = CredentialStore(settings.database_path)
     try:
         accounts = store.list_accounts()
         if len(accounts) != 1:
@@ -138,7 +166,7 @@ def _sync_commutes(arguments: argparse.Namespace, parser: argparse.ArgumentParse
         logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
         logging.getLogger("httpx").setLevel(logging.WARNING)
     settings = Settings.from_environment()
-    store = CredentialStore(settings.database_path, settings.load_or_create_encryption_key())
+    store = CredentialStore(settings.database_path)
     strava_client = StravaClient(settings)
     try:
         notifier = DiscordNotifier(settings)

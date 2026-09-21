@@ -17,10 +17,10 @@ class NotConnectedError(LookupError):
 
 
 class SessionCodec:
-    """Sign minimal browser sessions using a key derived from the local Fernet key."""
+    """Sign minimal browser sessions using the Strava client secret."""
 
-    def __init__(self, encryption_key: bytes) -> None:
-        self._key = hashlib.sha256(b"commuter-session-v1:" + encryption_key).digest()
+    def __init__(self, client_secret: str) -> None:
+        self._key = hashlib.sha256(b"commuter-session-v1:" + client_secret.encode("utf-8")).digest()
 
     def encode(self, athlete_id: int) -> str:
         """Sign a local athlete ID for a browser session cookie."""

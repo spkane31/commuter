@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from commuter.config import ConfigurationError, Settings
+from commuter.config import Settings
 from commuter.store import CredentialStore
 from commuter.strava import StravaAPIError, StravaClient
 
@@ -28,36 +28,27 @@ async def wipe_local_state(
     *,
     force_local: bool = False,
 ) -> WipeResult:
-    """Revoke stored connections, then remove the database, sidecars, and key.
+    """Revoke stored connections, then remove the database and sidecars.
 
     A normal wipe preserves local state if it cannot revoke Strava access. The
     explicit force option removes local state even when revocation is impossible.
     """
 
     database_path = settings.database_path
-    key_path = settings.encryption_key_path
     accounts = []
 
-    if database_path.exists():
-        if not key_path.is_file():
-            if not force_local:
-                raise WipeError(
-                    "Cannot revoke Strava access because the local encryption key is missing; "
-                    "rerun with --force-local to remove local files only"
-                )
-        else:
+    if database_path.exists() and not force_local:
+        try:
+            store = CredentialStore(database_path)
             try:
-                store = CredentialStore(database_path, settings.load_or_create_encryption_key())
-                try:
-                    accounts = store.list_accounts()
-                finally:
-                    store.close()
-            except (ConfigurationError, OSError, ValueError) as exc:
-                if not force_local:
-                    raise WipeError(
-                        "Cannot read local credentials to revoke Strava access; "
-                        "rerun with --force-local to remove local files only"
-                    ) from exc
+                accounts = store.list_accounts()
+            finally:
+                store.close()
+        except (OSError, ValueError) as exc:
+            raise WipeError(
+                "Cannot read local credentials to revoke Strava access; "
+                "rerun with --force-local to remove local files only"
+            ) from exc
 
     if not force_local:
         try:
@@ -69,7 +60,7 @@ async def wipe_local_state(
                 "Retry later or rerun with --force-local to remove local files only"
             ) from exc
 
-    for path in _local_state_paths(database_path, key_path):
+    for path in _local_state_paths(database_path):
         try:
             path.unlink()
         except FileNotFoundError:
@@ -80,12 +71,11 @@ async def wipe_local_state(
     return WipeResult(revoked_connections=len(accounts) if not force_local else 0, forced_local_wipe=force_local)
 
 
-def _local_state_paths(database_path: Path, key_path: Path) -> tuple[Path, Path, Path, Path]:
+def _local_state_paths(database_path: Path) -> tuple[Path, Path, Path]:
     """Return the exact non-recursive files that comprise local Commuter state."""
 
     return (
         database_path,
         database_path.with_name(f"{database_path.name}-wal"),
         database_path.with_name(f"{database_path.name}-shm"),
-        key_path,
     )

@@ -37,7 +37,6 @@ async def test_discord_notifier_posts_an_activity_update_without_parsing_mention
         strava_client_id="12345",
         strava_client_secret="test-client-secret",
         database_path=tmp_path / "commuter.db",
-        encryption_key_path=tmp_path / "commuter.key",
         base_url="http://127.0.0.1:8000",
         discord_bot_token="discord-token",
         discord_guild_id="123456789012345678",

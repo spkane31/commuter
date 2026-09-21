@@ -1,13 +1,10 @@
-"""Local configuration and secret-key management."""
+"""Local configuration management."""
 
 from __future__ import annotations
 
 import os
 from dataclasses import dataclass
 from pathlib import Path
-
-from cryptography.fernet import Fernet
-
 
 class ConfigurationError(ValueError):
     """Raised when required local configuration is missing or invalid."""
@@ -20,7 +17,6 @@ class Settings:
     strava_client_id: str
     strava_client_secret: str
     database_path: Path
-    encryption_key_path: Path
     base_url: str
     discord_bot_token: str = ""
     discord_guild_id: str = ""
@@ -59,42 +55,11 @@ class Settings:
             strava_client_id=_required_environment_value("STRAVA_CLIENT_ID"),
             strava_client_secret=_required_environment_value("STRAVA_CLIENT_SECRET"),
             database_path=Path(os.environ.get("COMMUTER_DATABASE_PATH", "commuter.db")),
-            encryption_key_path=Path(os.environ.get("COMMUTER_ENCRYPTION_KEY_PATH", ".commuter.key")),
             base_url=os.environ.get("COMMUTER_BASE_URL", "http://127.0.0.1:8000"),
             discord_bot_token=os.environ.get("DISCORD_BOT_TOKEN", "").strip(),
             discord_guild_id=os.environ.get("DISCORD_GUILD_ID", "").strip(),
             discord_channel_id=os.environ.get("DISCORD_CHANNEL_ID", "").strip(),
         )
-
-    def load_or_create_encryption_key(self) -> bytes:
-        """Load the local Fernet key or atomically create one with mode 0600."""
-
-        self.encryption_key_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-
-        try:
-            key = self.encryption_key_path.read_bytes().strip()
-        except FileNotFoundError:
-            key = Fernet.generate_key()
-            try:
-                descriptor = os.open(
-                    self.encryption_key_path,
-                    os.O_WRONLY | os.O_CREAT | os.O_EXCL,
-                    0o600,
-                )
-            except FileExistsError:
-                key = self.encryption_key_path.read_bytes().strip()
-            else:
-                with os.fdopen(descriptor, "wb") as key_file:
-                    key_file.write(key)
-
-        try:
-            Fernet(key)
-        except (TypeError, ValueError) as exc:
-            raise ConfigurationError(
-                f"Invalid Fernet key at {self.encryption_key_path}; replace it only if the credential database is empty"
-            ) from exc
-        return key
-
 
 def _required_environment_value(name: str) -> str:
     value = os.environ.get(name, "").strip()

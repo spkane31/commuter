@@ -28,7 +28,7 @@ extension, Google Maps, or an automatic fuel-price provider.
   `hide_from_home: true`, removing it from the home feed while retaining it on
   the athlete's profile.
 - **Persistent total for this private deployment.** The owner has chosen to
-  retain the per-activity savings record and cumulative total in the encrypted
+  retain the per-activity savings record and cumulative total in an owner-only
   local database.
 
 ## First-release experience
@@ -92,10 +92,10 @@ savings.
 | --- | --- |
 | Web/API service | Python, FastAPI, and HTTPX |
 | Scheduled work | `systemd` one-shot service and persistent 15-minute timer |
-| Credential and configuration storage | Encrypted local SQLite |
-| Authentication | Strava OAuth authorization-code flow and encrypted refresh tokens |
+| Credential and configuration storage | Owner-only local SQLite |
+| Authentication | Strava OAuth authorization-code flow and local refresh tokens |
 | Activity trigger | Poll `/athlete/activities` after the configured rule time |
-| Secrets | Owner-only local environment file and encryption key; no credentials in source or logs |
+| Secrets | Owner-only local environment file and database; no credentials in source or logs |
 | Tests | Pytest and mocked Strava HTTP responses |
 
 New Strava applications begin in single-player mode, which fits the personal
@@ -116,9 +116,9 @@ configured channel. [Discord message API](https://discord.com/developers/docs/re
 ## Local OAuth setup
 
 The first implemented slice is local Strava connection management. It starts a
-browser OAuth flow, checks state and granted scopes, encrypts the returned
-access and refresh tokens in SQLite, refreshes expired access tokens, and
-revokes/deletes the local connection on disconnect.
+browser OAuth flow, checks state and granted scopes, stores the returned access
+and refresh tokens in an owner-only SQLite database, refreshes expired access
+tokens, and revokes/deletes the local connection on disconnect.
 
 1. In the Strava API settings, configure the authorization callback domain as
    `127.0.0.1` for local development. The application callback is
@@ -138,12 +138,26 @@ revokes/deletes the local connection on disconnect.
 4. Visit `http://127.0.0.1:8000`, select **Connect with Strava**, and approve
    `activity:read_all` plus `activity:write`.
 
-The service creates `commuter.db` and `.commuter.key` in the project directory.
-The database holds encrypted access/refresh tokens; the Fernet key is local,
-created with owner-only permissions, and must be backed up alongside the
-database if the connection should survive a machine migration. Both artifacts
-are ignored by Git. The local privacy, terms, support, and deletion pages are
-available at `/privacy`, `/terms`, `/support`, and `/data-deletion`.
+The service creates `commuter.db` in the project directory with mode `0600`.
+The database holds access/refresh tokens and owner-entered settings in
+plaintext, which is appropriate only for this personal, local-network
+deployment. It is ignored by Git. The local privacy, terms, support, and
+deletion pages are available at `/privacy`, `/terms`, `/support`, and
+`/data-deletion`.
+
+### Migrating legacy encrypted storage
+
+Older Commuter databases used a Fernet key. Convert one on a supported computer
+before copying it to the Jessie Pi; this preserves the OAuth connection, rule,
+activity history, and cumulative totals while deleting the old key:
+
+```sh
+uv run --with 'cryptography<46' commuter migrate-plaintext-storage
+```
+
+The command uses `.commuter.key` beside `commuter.db` by default. For a key in
+another location, pass `--legacy-key-path PATH`. `cryptography` is temporary
+for this command and is not part of Commuter's normal installation.
 
 ## Raspberry Pi web service
 
@@ -153,9 +167,7 @@ and runs them as the user that invokes the command. It stores mutable state in
 service to `127.0.0.1`, so it does not expose a port to the LAN or internet.
 
 On Raspberry Pi OS or another Debian-based system, install `uv`, then run the
-target from the checkout's actual location. The target installs Python 3.13 so
-the 32-bit ARM build can use compatible PiWheels packages instead of compiling
-native cryptography dependencies:
+target from the checkout's actual location. The target installs Python 3.13:
 
 ```sh
 curl -LsSf https://astral.sh/uv/install.sh | sh
@@ -164,8 +176,8 @@ make install
 ```
 
 The first invocation creates `/etc/commuter/commuter.env` and exits. Populate
-that file, copy the encrypted database and key as described below, then run
-`make install` again. Enable the web service only when you need to use it:
+that file, then run `make install` again. Enable the web service only when you
+need to use it:
 
 ```sh
 sudo systemctl enable commuter-web.service
@@ -183,7 +195,7 @@ ssh -L 8000:127.0.0.1:8000 pi@commuter-pi
 ## Configure and poll commuter rides
 
 After connecting exactly one Strava account, configure the Home-to-Work rule in
-the encrypted local database. Coordinates are command-line input and are not
+the local database. Coordinates are command-line input and are not
 committed to this repository.
 
 ```sh
@@ -274,35 +286,31 @@ make install
 
 On its first invocation, the target creates the state/configuration directories
 and an `/etc/commuter/commuter.env` template, then stops. Populate the Strava
-and Discord settings, copy the encrypted database and matching encryption key
-into `/var/lib/commuter` as shown below, then run `make install` again.
+and Discord settings, copy an existing plaintext database into
+`/var/lib/commuter` as shown below, then run `make install` again.
 
 On later updates, run `git pull` in that checkout, then run `make install`
 again. The target synchronizes dependencies, regenerates the units with that
 checkout's current absolute path, reloads systemd, and restarts the active web
-service/timer. It deliberately does not replace the encrypted database,
-encryption key, or populated
+service/timer. It deliberately does not replace the database or populated
 `/etc/commuter/commuter.env`, preserving OAuth credentials, commute totals, and
 Discord configuration. The default `uv` path is `~/.local/bin/uv`; override it
 when necessary, for example `make install UV_BIN=/usr/local/bin/uv`.
 
 If the account connection and rule are configured on another computer before
-moving to the Pi, copy both the database and its matching encryption key. The
-database cannot be decrypted without the key:
+moving to the Pi, copy the database:
 
 ```sh
-scp -p commuter.db .commuter.key pi@commuter-pi:/tmp/
-ssh pi@commuter-pi '
-  sudo install -o commuter -g commuter -m 0600 /tmp/commuter.db /var/lib/commuter/commuter.db
-  sudo install -o commuter -g commuter -m 0600 /tmp/.commuter.key /var/lib/commuter/.commuter.key
+scp -p commuter.db pi@raspberrypi.local:/tmp/
+ssh pi@raspberrypi.local '
+  sudo install -o pi -g pi -m 0600 /tmp/commuter.db /var/lib/commuter/commuter.db
 '
 ```
 
 ## Wipe local state
 
 To stop using Commuter, revoke its Strava authorization and remove all local
-Commuter data—including credentials, settings, activity-processing state, and
-the encryption key—run:
+Commuter data—including credentials, settings, and activity-processing state—run:
 
 ```sh
 uv run commuter wipe
@@ -324,10 +332,10 @@ permissions (`chmod 600 .env`).
 
 ## Local data
 
-The encrypted database stores the OAuth connection, Home/Work coordinates,
-vehicle inputs, durable cumulative savings and CO₂ totals, and activity
-outcomes. It does not retain raw Strava activity payloads. `commuter wipe`
-removes the database and encryption key when the Pi or service is retired.
+The owner-only plaintext database stores the OAuth connection, Home/Work
+coordinates, vehicle inputs, durable cumulative savings and CO₂ totals, and
+activity outcomes. It does not retain raw Strava activity payloads. `commuter
+wipe` removes the database when the Pi or service is retired.
 
 ## Deferred work
 

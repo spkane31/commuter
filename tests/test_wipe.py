@@ -28,10 +28,9 @@ def test_wipe_command_revokes_and_removes_all_local_state(monkeypatch, tmp_path:
         strava_client_id="12345",
         strava_client_secret="test-client-secret",
         database_path=tmp_path / "commuter.db",
-        encryption_key_path=tmp_path / "commuter.key",
         base_url="http://127.0.0.1:8000",
     )
-    store = CredentialStore(settings.database_path, settings.load_or_create_encryption_key())
+    store = CredentialStore(settings.database_path)
     store.save_account(
         athlete=Athlete(id=123, username="commuter"),
         scopes={"activity:read_all", "activity:write"},
@@ -66,7 +65,6 @@ def test_wipe_command_revokes_and_removes_all_local_state(monkeypatch, tmp_path:
     assert not settings.database_path.exists()
     assert not database_wal.exists()
     assert not database_shm.exists()
-    assert not settings.encryption_key_path.exists()
 
 
 def test_force_local_wipe_removes_state_when_revocation_fails(monkeypatch, tmp_path: Path) -> None:
@@ -76,10 +74,9 @@ def test_force_local_wipe_removes_state_when_revocation_fails(monkeypatch, tmp_p
         strava_client_id="12345",
         strava_client_secret="test-client-secret",
         database_path=tmp_path / "commuter.db",
-        encryption_key_path=tmp_path / "commuter.key",
         base_url="http://127.0.0.1:8000",
     )
-    store = CredentialStore(settings.database_path, settings.load_or_create_encryption_key())
+    store = CredentialStore(settings.database_path)
     store.save_account(
         athlete=Athlete(id=123, username="commuter"),
         scopes={"activity:read_all", "activity:write"},
@@ -108,4 +105,3 @@ def test_force_local_wipe_removes_state_when_revocation_fails(monkeypatch, tmp_p
 
     assert fake_strava.revoked_tokens == []
     assert not settings.database_path.exists()
-    assert not settings.encryption_key_path.exists()

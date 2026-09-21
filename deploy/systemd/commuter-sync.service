@@ -16,5 +16,4 @@ UMask=0077
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectHome=read-only
-ProtectSystem=strict
-ReadWritePaths=/var/lib/commuter
+ProtectSystem=true

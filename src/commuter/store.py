@@ -1,4 +1,4 @@
-"""Encrypted local SQLite storage for Strava credentials."""
+"""Owner-only local SQLite storage for Strava credentials."""
 
 from __future__ import annotations
 
@@ -9,25 +9,22 @@ import threading
 import time
 from pathlib import Path
 
-from cryptography.fernet import Fernet
-
 from commuter.models import Account, ActivityProcessing, Athlete, CommuteConfiguration, Coordinate, TokenSet
 
 
 class CredentialStore:
-    """Store encrypted OAuth credentials in a local SQLite database."""
+    """Store OAuth credentials in an owner-only local SQLite database."""
 
-    def __init__(self, database_path: Path, encryption_key: bytes) -> None:
+    def __init__(self, database_path: Path) -> None:
         database_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         self._connection = sqlite3.connect(database_path, check_same_thread=False)
         self._connection.row_factory = sqlite3.Row
         self._lock = threading.RLock()
-        self._fernet = Fernet(encryption_key)
         self._initialize_schema()
         os.chmod(database_path, 0o600)
 
     def save_account(self, athlete: Athlete, scopes: set[str], tokens: TokenSet) -> None:
-        """Insert or replace an athlete's encrypted token set."""
+        """Insert or replace an athlete's token set."""
 
         now = int(time.time())
         with self._lock, self._connection:
@@ -49,8 +46,8 @@ class CredentialStore:
                     athlete.id,
                     athlete.username,
                     json.dumps(sorted(scopes)),
-                    self._encrypt(tokens.access_token),
-                    self._encrypt(tokens.refresh_token),
+                    tokens.access_token,
+                    tokens.refresh_token,
                     tokens.expires_at,
                     now,
                     now,
@@ -58,7 +55,7 @@ class CredentialStore:
             )
 
     def get_account(self, athlete_id: int) -> Account | None:
-        """Return an account with credentials decrypted only for the caller."""
+        """Return an account with credentials for the caller."""
 
         with self._lock:
             row = self._connection.execute(
@@ -75,8 +72,8 @@ class CredentialStore:
         return Account(
             athlete=Athlete(id=row["athlete_id"], username=row["username"]),
             scopes=set(json.loads(row["scopes"])),
-            access_token=self._decrypt(row["access_token"]),
-            refresh_token=self._decrypt(row["refresh_token"]),
+            access_token=row["access_token"],
+            refresh_token=row["refresh_token"],
             expires_at=row["expires_at"],
         )
 
@@ -96,10 +93,10 @@ class CredentialStore:
             self._connection.execute("DELETE FROM accounts WHERE athlete_id = ?", (athlete_id,))
 
     def save_commute_configuration(self, configuration: CommuteConfiguration) -> None:
-        """Save encrypted owner-entered commute settings without resetting the total."""
+        """Save owner-entered commute settings without resetting the total."""
 
         now = int(time.time())
-        payload = self._encrypt(_serialize_commute_configuration(configuration))
+        payload = _serialize_commute_configuration(configuration)
         with self._lock, self._connection:
             existing = self._connection.execute(
                 "SELECT cumulative_savings_cents, cumulative_co2_avoided_grams, created_at "
@@ -136,7 +133,7 @@ class CredentialStore:
             )
 
     def get_commute_configuration(self, athlete_id: int) -> CommuteConfiguration | None:
-        """Return an athlete's decrypted commute rule and cumulative total."""
+        """Return an athlete's commute rule and cumulative total."""
 
         with self._lock:
             row = self._connection.execute(
@@ -151,7 +148,7 @@ class CredentialStore:
             return None
         return _deserialize_commute_configuration(
             athlete_id=athlete_id,
-            value=self._decrypt(row["configuration"]),
+            value=row["configuration"],
             cumulative_savings_cents=row["cumulative_savings_cents"],
             cumulative_co2_avoided_grams=row["cumulative_co2_avoided_grams"],
             created_at=row["created_at"],
@@ -325,8 +322,8 @@ class CredentialStore:
                     athlete_id INTEGER PRIMARY KEY,
                     username TEXT,
                     scopes TEXT NOT NULL,
-                    access_token BLOB NOT NULL,
-                    refresh_token BLOB NOT NULL,
+                    access_token TEXT NOT NULL,
+                    refresh_token TEXT NOT NULL,
                     expires_at INTEGER NOT NULL,
                     created_at INTEGER NOT NULL,
                     updated_at INTEGER NOT NULL
@@ -337,7 +334,7 @@ class CredentialStore:
                 """
                 CREATE TABLE IF NOT EXISTS commute_configurations (
                     athlete_id INTEGER PRIMARY KEY,
-                    configuration BLOB NOT NULL,
+                    configuration TEXT NOT NULL,
                     cumulative_savings_cents INTEGER NOT NULL,
                     cumulative_co2_avoided_grams INTEGER NOT NULL DEFAULT 0,
                     created_at INTEGER NOT NULL,
@@ -376,15 +373,8 @@ class CredentialStore:
         if column not in columns:
             self._connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
-    def _encrypt(self, value: str) -> bytes:
-        return self._fernet.encrypt(value.encode("utf-8"))
-
-    def _decrypt(self, value: bytes) -> str:
-        return self._fernet.decrypt(value).decode("utf-8")
-
-
 def _serialize_commute_configuration(configuration: CommuteConfiguration) -> str:
-    """Encode owner-entered settings before encrypting them in SQLite."""
+    """Encode owner-entered settings for SQLite."""
 
     return json.dumps(
         {
@@ -407,7 +397,7 @@ def _deserialize_commute_configuration(
     cumulative_co2_avoided_grams: int,
     created_at: int,
 ) -> CommuteConfiguration:
-    """Decode validated local configuration from the encrypted database blob."""
+    """Decode validated local configuration from SQLite."""
 
     try:
         payload = json.loads(value)

@@ -18,13 +18,12 @@ def test_configure_commute_command_saves_the_home_work_rule(monkeypatch, tmp_pat
         strava_client_id="12345",
         strava_client_secret="test-client-secret",
         database_path=tmp_path / "commuter.db",
-        encryption_key_path=tmp_path / "commuter.key",
         base_url="http://127.0.0.1:8000",
         discord_bot_token="discord-token",
         discord_guild_id="123456789012345678",
         discord_channel_id="234567890123456789",
     )
-    store = CredentialStore(settings.database_path, settings.load_or_create_encryption_key())
+    store = CredentialStore(settings.database_path)
     athlete = Athlete(id=123, username="commuter")
     store.save_account(
         athlete=athlete,
@@ -69,7 +68,7 @@ def test_configure_commute_command_saves_the_home_work_rule(monkeypatch, tmp_pat
 
     output = capsys.readouterr().out
     assert output == "Commute configuration saved for athlete 123.\n"
-    store = CredentialStore(settings.database_path, settings.load_or_create_encryption_key())
+    store = CredentialStore(settings.database_path)
     configuration = store.get_commute_configuration(123)
     assert configuration is not None
     assert configuration.home.latitude == 39.781003858657165
@@ -87,7 +86,6 @@ def test_sync_command_reports_strava_errors_without_a_traceback(monkeypatch, tmp
         strava_client_id="12345",
         strava_client_secret="test-client-secret",
         database_path=tmp_path / "commuter.db",
-        encryption_key_path=tmp_path / "commuter.key",
         base_url="http://127.0.0.1:8000",
         discord_bot_token="discord-token",
         discord_guild_id="123456789012345678",

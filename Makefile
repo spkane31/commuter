@@ -11,7 +11,7 @@ PROJECT_ROOT := $(realpath $(CURDIR))
 .PHONY: install
 
 # Run on the Raspberry Pi from any already-copied or git-pulled checkout.
-# It never replaces the encrypted database, Fernet key, or populated env file.
+# It never replaces the owner-only plaintext database or populated env file.
 install:
 	test -x "$(UV_BIN)"
 	"$(UV_BIN)" sync --frozen --no-dev --python "$(PYTHON_VERSION)"
