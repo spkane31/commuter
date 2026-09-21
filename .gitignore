@@ -27,9 +27,8 @@ htmlcov/
 .ipynb_checkpoints/
 .local/
 
-# Local Commuter configuration and encrypted state
+# Local Commuter configuration and state
 .env
-.commuter.key
 commuter.db
 commuter.db-shm
 commuter.db-wal

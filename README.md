@@ -145,20 +145,6 @@ deployment. It is ignored by Git. The local privacy, terms, support, and
 deletion pages are available at `/privacy`, `/terms`, `/support`, and
 `/data-deletion`.
 
-### Migrating legacy encrypted storage
-
-Older Commuter databases used a Fernet key. Convert one on a supported computer
-before copying it to the Jessie Pi; this preserves the OAuth connection, rule,
-activity history, and cumulative totals while deleting the old key:
-
-```sh
-uv run --with 'cryptography<46' commuter migrate-plaintext-storage
-```
-
-The command uses `.commuter.key` beside `commuter.db` by default. For a key in
-another location, pass `--legacy-key-path PATH`. `cryptography` is temporary
-for this command and is not part of Commuter's normal installation.
-
 ## Raspberry Pi web service
 
 `make install` generates systemd units for the path of the current checkout
