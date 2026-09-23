@@ -45,12 +45,23 @@ class Coordinate:
 
 
 @dataclass(frozen=True)
+class Location:
+    """A named, owner-configured commute endpoint."""
+
+    name: str
+    coordinate: Coordinate
+
+
+@dataclass(frozen=True)
 class CommuteConfiguration:
-    """One athlete's Home-to-Work commuter rule and fuel assumptions."""
+    """One athlete's commuter rule and fuel assumptions.
+
+    A Ride between any two distinct configured locations, in either
+    direction, is treated as a commute.
+    """
 
     athlete_id: int
-    home: Coordinate
-    work: Coordinate
+    locations: tuple[Location, ...]
     radius_m: int
     combined_mpg: float
     gas_price_cents: int

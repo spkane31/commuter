@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Any, Protocol
 
-from commuter.models import GASOLINE_CO2_GRAMS_PER_GALLON, ActivityProcessing, CommuteConfiguration, Coordinate
+from commuter.models import GASOLINE_CO2_GRAMS_PER_GALLON, ActivityProcessing, CommuteConfiguration, Coordinate, Location
 from commuter.store import CredentialStore
 
 EARTH_RADIUS_M = 6_371_000
@@ -237,7 +237,13 @@ async def synchronize_commutes(
 def validate_commute_configuration(configuration: CommuteConfiguration) -> None:
     """Reject incomplete or unsafe manual settings before a live update."""
 
-    for coordinate in (configuration.home, configuration.work):
+    if len(configuration.locations) < 2:
+        raise CommuteConfigurationError("At least two locations are required")
+    names = [location.name for location in configuration.locations]
+    if len(names) != len(set(names)) or any(not name for name in names):
+        raise CommuteConfigurationError("Each location must have a unique, non-empty name")
+    for location in configuration.locations:
+        coordinate = location.coordinate
         if not -90 <= coordinate.latitude <= 90 or not -180 <= coordinate.longitude <= 180:
             raise CommuteConfigurationError("Location coordinates must be valid latitude/longitude values")
     if configuration.radius_m <= 0:
@@ -272,26 +278,25 @@ def commute_decision(activity: ActivityDetails, configuration: CommuteConfigurat
     if activity.end is None:
         return CommuteDecision(False, "end coordinates are unavailable")
 
-    start_home_m = haversine_meters(activity.start, configuration.home)
-    start_work_m = haversine_meters(activity.start, configuration.work)
-    end_home_m = haversine_meters(activity.end, configuration.home)
-    end_work_m = haversine_meters(activity.end, configuration.work)
-    if start_home_m <= configuration.radius_m and end_work_m <= configuration.radius_m:
-        return CommuteDecision(
-            True,
-            f"Home -> Work (start-home={start_home_m:.0f}m, end-work={end_work_m:.0f}m)",
-        )
-    if start_work_m <= configuration.radius_m and end_home_m <= configuration.radius_m:
-        return CommuteDecision(
-            True,
-            f"Work -> Home (start-work={start_work_m:.0f}m, end-home={end_home_m:.0f}m)",
-        )
+    for origin, destination in _distinct_location_pairs(configuration.locations):
+        start_m = haversine_meters(activity.start, origin.coordinate)
+        end_m = haversine_meters(activity.end, destination.coordinate)
+        if start_m <= configuration.radius_m and end_m <= configuration.radius_m:
+            return CommuteDecision(
+                True,
+                f"{origin.name} -> {destination.name} (start-{origin.name}={start_m:.0f}m, "
+                f"end-{destination.name}={end_m:.0f}m)",
+            )
     return CommuteDecision(
         False,
-        "endpoints do not connect Home and Work "
-        f"(radius={configuration.radius_m}m; start-home={start_home_m:.0f}m, "
-        f"start-work={start_work_m:.0f}m, end-home={end_home_m:.0f}m, end-work={end_work_m:.0f}m)",
+        f"endpoints do not connect any two configured locations (radius={configuration.radius_m}m)",
     )
+
+
+def _distinct_location_pairs(locations: tuple[Location, ...]) -> list[tuple[Location, Location]]:
+    """Return every ordered pair of two different configured locations."""
+
+    return [(origin, destination) for origin in locations for destination in locations if origin.name != destination.name]
 
 
 def calculate_savings_cents(configuration: CommuteConfiguration, distance_m: float) -> int:

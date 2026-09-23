@@ -15,7 +15,7 @@ from commuter.auth import TokenManager
 from commuter.commute import CommuteConfigurationError, synchronize_commutes, validate_commute_configuration
 from commuter.config import Settings
 from commuter.discord import DiscordAPIError, DiscordNotifier
-from commuter.models import CommuteConfiguration, Coordinate
+from commuter.models import CommuteConfiguration, Coordinate, Location
 from commuter.store import CredentialStore
 from commuter.strava import StravaAPIError, StravaClient
 from commuter.wipe import WipeError, wipe_local_state
@@ -34,10 +34,16 @@ def main() -> None:
     )
     configure_parser = subcommands.add_parser(
         "configure-commute",
-        help="Save one Home-to-Work commute rule for the connected athlete",
+        help="Save the connected athlete's commute locations and rule",
     )
-    configure_parser.add_argument("--home", required=True, metavar="LATITUDE,LONGITUDE")
-    configure_parser.add_argument("--work", required=True, metavar="LATITUDE,LONGITUDE")
+    configure_parser.add_argument(
+        "--location",
+        dest="locations",
+        action="append",
+        required=True,
+        metavar="NAME,LATITUDE,LONGITUDE",
+        help="A named commute endpoint; repeat for each location (at least 2 required)",
+    )
     configure_parser.add_argument("--radius-m", required=True, type=int)
     configure_parser.add_argument("--combined-mpg", required=True, type=float)
     configure_parser.add_argument("--gas-price", required=True, metavar="DOLLARS_PER_GALLON")
@@ -97,7 +103,7 @@ def main() -> None:
 
 
 def _configure_commute(arguments: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
-    """Persist a single owner-supplied Home-to-Work configuration."""
+    """Persist a single owner-supplied commute configuration."""
 
     settings = Settings.from_environment()
     store = CredentialStore(settings.database_path)
@@ -107,8 +113,7 @@ def _configure_commute(arguments: argparse.Namespace, parser: argparse.ArgumentP
             parser.error("Connect exactly one Strava account before configuring commuter rides")
         configuration = CommuteConfiguration(
             athlete_id=accounts[0].athlete.id,
-            home=_parse_coordinate(arguments.home),
-            work=_parse_coordinate(arguments.work),
+            locations=tuple(_parse_location(value) for value in arguments.locations),
             radius_m=arguments.radius_m,
             combined_mpg=arguments.combined_mpg,
             gas_price_cents=_gas_price_cents(arguments.gas_price),
@@ -183,6 +188,19 @@ def _parse_coordinate(value: str) -> Coordinate:
         return Coordinate(latitude=float(latitude), longitude=float(longitude))
     except (TypeError, ValueError) as exc:
         raise ValueError("Coordinates must use LATITUDE,LONGITUDE") from exc
+
+
+def _parse_location(value: str) -> Location:
+    """Parse a NAME,LATITUDE,LONGITUDE command-line argument."""
+
+    try:
+        name, coordinate = value.split(",", maxsplit=1)
+    except ValueError as exc:
+        raise ValueError("Locations must use NAME,LATITUDE,LONGITUDE") from exc
+    name = name.strip()
+    if not name:
+        raise ValueError("Locations must use NAME,LATITUDE,LONGITUDE")
+    return Location(name=name, coordinate=_parse_coordinate(coordinate))
 
 
 def _gas_price_cents(value: str) -> int:

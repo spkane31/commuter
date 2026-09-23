@@ -34,8 +34,8 @@ extension, Google Maps, or an automatic fuel-price provider.
 ## First-release experience
 
 1. Sign in with Strava and grant `activity:read_all,activity:write`.
-2. Configure a Home-to-Work rule, its endpoint radius, vehicle fuel economy,
-   and gas price.
+2. Configure a commute rule with at least two named locations, an endpoint
+   radius, vehicle fuel economy, and gas price.
 3. Upload a qualifying `Ride` after the rule is created.
 4. The Pi polls Strava every 15 minutes, marks the ride as a commute, and
    appends a managed description block:
@@ -65,10 +65,11 @@ distance(activity.start, origin.location) <= origin.radius
 distance(activity.end, destination.location) <= destination.radius
 ```
 
-`Home ↔ Work` is direction-independent; it matches either Home-to-Work or
-Work-to-Home. Future rules can be one-way. Missing or privacy-obscured endpoint
-coordinates, or a missing activity distance, are safe non-matches, never an
-automatic commute.
+Any two distinct configured locations are direction-independent; a ride
+matching Location A ↔ Location B also matches Location B ↔ Location A. A ride
+that starts and ends at the same location never matches. Missing or
+privacy-obscured endpoint coordinates, or a missing activity distance, are
+safe non-matches, never an automatic commute.
 
 For a matched activity:
 
@@ -180,23 +181,27 @@ ssh -L 8000:127.0.0.1:8000 pi@commuter-pi
 
 ## Configure and poll commuter rides
 
-After connecting exactly one Strava account, configure the Home-to-Work rule in
+After connecting exactly one Strava account, configure the commute rule in
 the local database. Coordinates are command-line input and are not
 committed to this repository.
 
 ```sh
 uv run commuter configure-commute \
-  --home LATITUDE,LONGITUDE \
-  --work LATITUDE,LONGITUDE \
+  --location home,LATITUDE,LONGITUDE \
+  --location work,LATITUDE,LONGITUDE \
+  --location gym,LATITUDE,LONGITUDE \
   --radius-m 150 \
   --combined-mpg 25 \
   --gas-price 4.34 \
   --vehicle "2016 Subaru Forester"
 ```
 
-The rule applies to `Ride` activities that begin within the configured radius
-of one endpoint and finish within the radius of the other, in either direction.
-For each matching ride, Commuter converts the ride's Strava distance from
+Repeat `--location NAME,LATITUDE,LONGITUDE` for each place you want the rule to
+cover; at least two are required. The rule applies to `Ride` activities that
+begin within the configured radius of one location and finish within the
+radius of a *different* configured location, in either direction—a ride that
+starts and ends at the same location does not match. For each matching ride,
+Commuter converts the ride's Strava distance from
 meters to miles, then uses it with the configured MPG and gas price. It marks
 the activity as a Strava commute and appends a managed description block with
 that ride's savings and the persistent cumulative total. Existing non-Commuter
@@ -233,7 +238,7 @@ uv run commuter sync --backfill-days 2 --recheck-non-matches --dry-run --verbose
 
 After reviewing that output, remove `--dry-run` to apply newly matched rides.
 Rides already marked as a Strava commute are treated as Commuter matches even
-when their saved endpoints do not fall within the configured Home/Work radius.
+when their saved endpoints do not fall within any configured location's radius.
 
 If a poll reports HTTP 401 or 403, start the local web application with
 `uv run commuter`, visit http://127.0.0.1:8000, and use **Connect with Strava**
@@ -318,9 +323,9 @@ permissions (`chmod 600 .env`).
 
 ## Local data
 
-The owner-only plaintext database stores the OAuth connection, Home/Work
-coordinates, vehicle inputs, durable cumulative savings and CO₂ totals, and
-activity outcomes. It does not retain raw Strava activity payloads. `commuter
+The owner-only plaintext database stores the OAuth connection, configured
+location coordinates, vehicle inputs, durable cumulative savings and CO₂
+totals, and activity outcomes. It does not retain raw Strava activity payloads. `commuter
 wipe` removes the database when the Pi or service is retired.
 
 ## Deferred work

@@ -7,12 +7,13 @@ from pathlib import Path
 import pytest
 
 from commuter.commute import CommuteConfiguration, Coordinate, synchronize_commutes
-from commuter.models import ActivityProcessing, Athlete, TokenSet
+from commuter.models import ActivityProcessing, Athlete, Location, TokenSet
 from commuter.store import CredentialStore
 
 
 HOME = Coordinate(latitude=39.781003858657165, longitude=-105.02303718996976)
 WORK = Coordinate(latitude=39.74341292772691, longitude=-104.9886192024491)
+GYM = Coordinate(latitude=39.75123, longitude=-105.00110)
 
 
 @dataclass
@@ -109,8 +110,27 @@ def store(tmp_path: Path) -> CredentialStore:
     store.save_commute_configuration(
         CommuteConfiguration(
             athlete_id=123,
-            home=HOME,
-            work=WORK,
+            locations=(Location(name="home", coordinate=HOME), Location(name="work", coordinate=WORK)),
+            radius_m=150,
+            combined_mpg=25.0,
+            gas_price_cents=434,
+            vehicle_name="2016 Subaru Forester",
+            currency="USD",
+        )
+    )
+    return store
+
+
+@pytest.fixture
+def store_with_gym(store: CredentialStore) -> CredentialStore:
+    store.save_commute_configuration(
+        CommuteConfiguration(
+            athlete_id=123,
+            locations=(
+                Location(name="home", coordinate=HOME),
+                Location(name="work", coordinate=WORK),
+                Location(name="gym", coordinate=GYM),
+            ),
             radius_m=150,
             combined_mpg=25.0,
             gas_price_cents=434,
@@ -345,5 +365,61 @@ async def test_recheck_logs_match_reasons_and_processes_a_manually_tagged_commut
     assert "activity=100 matches: already marked as a Strava commute" in caplog.text
     assert (
         "activity=300 date=2026-09-17 type=Ride distance=1.00mi "
-        "does not match: endpoints do not connect Home and Work"
+        "does not match: endpoints do not connect any two configured locations"
     ) in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_sync_matches_a_ride_between_any_two_configured_locations(store_with_gym: CredentialStore) -> None:
+    client = FakeActivityClient(
+        details={
+            100: {
+                "id": 100,
+                "sport_type": "Ride",
+                "start_latlng": [GYM.latitude, GYM.longitude],
+                "end_latlng": [WORK.latitude, WORK.longitude],
+                "distance": 4_828.032,
+                "description": "Gym to work",
+            },
+        },
+        summaries=[{"id": 100, "start_date": "2026-09-22T07:00:00Z"}],
+    )
+
+    result = await synchronize_commutes(
+        store=store_with_gym,
+        token_manager=FakeTokenManager(),
+        strava_client=client,
+        notifier=FakeNotifier(),
+    )
+
+    assert result.updated_activity_ids == [100]
+    assert client.updates[0][1]["commute"] is True
+
+
+@pytest.mark.asyncio
+async def test_a_ride_starting_and_ending_at_the_same_location_does_not_match(
+    store_with_gym: CredentialStore,
+) -> None:
+    client = FakeActivityClient(
+        details={
+            100: {
+                "id": 100,
+                "sport_type": "Ride",
+                "start_latlng": [HOME.latitude, HOME.longitude],
+                "end_latlng": [HOME.latitude, HOME.longitude],
+                "distance": 8_046.72,
+                "description": "Loop from home",
+            },
+        },
+        summaries=[{"id": 100, "start_date": "2026-09-22T07:00:00Z"}],
+    )
+
+    result = await synchronize_commutes(
+        store=store_with_gym,
+        token_manager=FakeTokenManager(),
+        strava_client=client,
+        notifier=FakeNotifier(),
+    )
+
+    assert result.updated_activity_ids == []
+    assert result.non_matching_activity_ids == [100]

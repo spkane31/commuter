@@ -9,7 +9,7 @@ import threading
 import time
 from pathlib import Path
 
-from commuter.models import Account, ActivityProcessing, Athlete, CommuteConfiguration, Coordinate, TokenSet
+from commuter.models import Account, ActivityProcessing, Athlete, CommuteConfiguration, Coordinate, Location, TokenSet
 
 
 class CredentialStore:
@@ -378,8 +378,14 @@ def _serialize_commute_configuration(configuration: CommuteConfiguration) -> str
 
     return json.dumps(
         {
-            "home": {"latitude": configuration.home.latitude, "longitude": configuration.home.longitude},
-            "work": {"latitude": configuration.work.latitude, "longitude": configuration.work.longitude},
+            "locations": [
+                {
+                    "name": location.name,
+                    "latitude": location.coordinate.latitude,
+                    "longitude": location.coordinate.longitude,
+                }
+                for location in configuration.locations
+            ],
             "radius_m": configuration.radius_m,
             "combined_mpg": configuration.combined_mpg,
             "gas_price_cents": configuration.gas_price_cents,
@@ -401,12 +407,16 @@ def _deserialize_commute_configuration(
 
     try:
         payload = json.loads(value)
-        home = payload["home"]
-        work = payload["work"]
+        locations = tuple(
+            Location(
+                name=str(location["name"]),
+                coordinate=Coordinate(latitude=float(location["latitude"]), longitude=float(location["longitude"])),
+            )
+            for location in payload["locations"]
+        )
         return CommuteConfiguration(
             athlete_id=athlete_id,
-            home=Coordinate(latitude=float(home["latitude"]), longitude=float(home["longitude"])),
-            work=Coordinate(latitude=float(work["latitude"]), longitude=float(work["longitude"])),
+            locations=locations,
             radius_m=int(payload["radius_m"]),
             combined_mpg=float(payload["combined_mpg"]),
             gas_price_cents=int(payload["gas_price_cents"]),

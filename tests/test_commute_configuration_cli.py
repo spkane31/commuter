@@ -11,7 +11,7 @@ from commuter.store import CredentialStore
 from commuter.strava import StravaAPIError
 
 
-def test_configure_commute_command_saves_the_home_work_rule(monkeypatch, tmp_path: Path, capsys) -> None:
+def test_configure_commute_command_saves_the_location_rule(monkeypatch, tmp_path: Path, capsys) -> None:
     import commuter.main as cli
 
     settings = Settings(
@@ -49,10 +49,12 @@ def test_configure_commute_command_saves_the_home_work_rule(monkeypatch, tmp_pat
         [
             "commuter",
             "configure-commute",
-            "--home",
-            "39.781003858657165,-105.02303718996976",
-            "--work",
-            "39.74341292772691,-104.9886192024491",
+            "--location",
+            "home,39.781003858657165,-105.02303718996976",
+            "--location",
+            "work,39.74341292772691,-104.9886192024491",
+            "--location",
+            "gym,39.75123,-105.00110",
             "--radius-m",
             "150",
             "--combined-mpg",
@@ -71,8 +73,10 @@ def test_configure_commute_command_saves_the_home_work_rule(monkeypatch, tmp_pat
     store = CredentialStore(settings.database_path)
     configuration = store.get_commute_configuration(123)
     assert configuration is not None
-    assert configuration.home.latitude == 39.781003858657165
-    assert configuration.work.longitude == -104.9886192024491
+    locations_by_name = {location.name: location.coordinate for location in configuration.locations}
+    assert locations_by_name["home"].latitude == 39.781003858657165
+    assert locations_by_name["work"].longitude == -104.9886192024491
+    assert locations_by_name["gym"].latitude == 39.75123
     assert configuration.radius_m == 150
     assert configuration.combined_mpg == 25.0
     assert configuration.gas_price_cents == 434
