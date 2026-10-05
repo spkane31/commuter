@@ -222,3 +222,28 @@ async def test_expired_token_is_refreshed_and_rotated(
     account = store.get_account(123)
     assert account is not None
     assert account.refresh_token == "rotated-refresh-token"
+
+
+def test_disconnect_preserves_connection_while_sync_is_running(
+    client, settings, fake_strava
+) -> None:
+    from commuter.auth import SessionCodec
+    from commuter.state import process_lock
+
+    store = client.app.state.store
+    store.save_account(
+        Athlete(123, "commuter"),
+        {"activity:read_all", "activity:write"},
+        TokenSet("access", "refresh", 2000000000, None),
+    )
+    client.cookies.set(
+        "commuter_session", SessionCodec(settings.strava_client_secret).encode(123)
+    )
+    client.cookies.set("commuter_csrf", "csrf")
+    with process_lock(settings.database_path.with_suffix(".sync.lock")):
+        response = client.post(
+            "/auth/strava/disconnect", headers={"X-CSRF-Token": "csrf"}
+        )
+    assert response.status_code == 409
+    assert fake_strava.revoked_token is None
+    assert store.get_account(123) is not None

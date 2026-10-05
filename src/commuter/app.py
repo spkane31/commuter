@@ -20,7 +20,9 @@ SESSION_COOKIE = "commuter_session"
 CSRF_COOKIE = "commuter_csrf"
 
 
-def create_app(settings: Settings | None = None, strava_client: StravaClient | None = None) -> FastAPI:
+def create_app(
+    settings: Settings | None = None, strava_client: StravaClient | None = None
+) -> FastAPI:
     """Create the local OAuth application with explicit dependency injection."""
 
     settings = settings or Settings.from_environment()
@@ -34,6 +36,9 @@ def create_app(settings: Settings | None = None, strava_client: StravaClient | N
     app.state.strava_client = strava_client
     app.state.token_manager = TokenManager(store=store, strava_client=strava_client)
     app.state.session_codec = session_codec
+    from commuter.pipeline import build_pipeline
+
+    app.state.pipeline = build_pipeline(("commuter", "sheets"))
 
     @app.get("/", response_class=HTMLResponse)
     async def home() -> str:
@@ -128,14 +133,30 @@ def create_app(settings: Settings | None = None, strava_client: StravaClient | N
     async def disconnect_strava(request: Request) -> Response:
         account = _current_account(request, store, session_codec)
         _require_csrf(request)
+        from commuter.state import SourceCache, process_lock
+
         try:
-            await strava_client.revoke(account.refresh_token)
+            with (
+                process_lock(settings.database_path.with_suffix(".sync.lock")),
+                process_lock(
+                    settings.database_path.with_suffix(
+                        f".{account.athlete.id}.token.lock"
+                    )
+                ),
+            ):
+                account = _current_account(request, store, session_codec)
+                await strava_client.revoke(account.refresh_token)
+                SourceCache(settings.cache_directory).remove(account.athlete.id)
+                store.delete_account(account.athlete.id)
         except StravaAPIError as exc:
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY,
                 detail="Strava could not revoke the connection; local credentials were retained",
             ) from exc
-        store.delete_account(account.athlete.id)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT, detail=str(exc)
+            ) from exc
         response = Response(status_code=status.HTTP_204_NO_CONTENT)
         response.delete_cookie(SESSION_COOKIE)
         response.delete_cookie(CSRF_COOKIE)
@@ -149,7 +170,8 @@ def create_app(settings: Settings | None = None, strava_client: StravaClient | N
             <h1>Privacy</h1>
             <p>Commuter stores only the information needed to operate its local Strava connection: OAuth credentials and settings you enter.</p>
             <p>When it updates a commute, Commuter sends the Strava activity link plus fuel-savings and CO₂-avoidance summaries to the owner-configured Discord channel.</p>
-            <p>Activity data is processed for automation and must not be retained beyond the permitted short-lived window.</p>
+            <p>Commute outcomes and cumulative totals are stored locally. When training export is enabled, raw activities and sensor streams are cached privately for recalculation and reporting tables are uploaded to the configured Google workbook.</p>
+            <p>Disconnect removes local account state and cached workouts. Google workbook data and Discord messages remain until you delete them in those services.</p>
             <p>You can disconnect Strava and request deletion through <a href="/data-deletion">data deletion</a>.</p>
             """,
         )

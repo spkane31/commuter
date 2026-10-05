@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import time
+from contextlib import asynccontextmanager
 from typing import Any
 
 import httpx
@@ -20,6 +22,10 @@ logger = logging.getLogger(__name__)
 
 class StravaAPIError(RuntimeError):
     """Raised when Strava cannot complete an OAuth operation."""
+
+    def __init__(self, message: str, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
 
 
 class StravaRateLimitError(StravaAPIError):
@@ -38,6 +44,30 @@ class StravaClient:
 
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
+        self._session = None
+        self._retry_at = 0.0
+        self.deadline: float | None = None
+
+    async def __aenter__(self):
+        self._session = httpx.AsyncClient(timeout=10.0)
+        return self
+
+    async def __aexit__(self, *args):
+        if self._session is not None:
+            await self._session.aclose()
+            self._session = None
+
+    @asynccontextmanager
+    async def _activity_session(self):
+        if self._retry_at > time.time():
+            raise StravaRateLimitError(math.ceil(self._retry_at - time.time()))
+        if self.deadline is not None and time.monotonic() + 12 >= self.deadline:
+            raise StravaRateLimitError(1)
+        if self._session is not None:
+            yield self._session
+        else:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                yield client
 
     async def exchange_authorization_code(self, code: str) -> TokenSet:
         """Exchange a one-time authorization code for an athlete token set."""
@@ -88,17 +118,69 @@ class StravaClient:
         *,
         after: int,
         per_page: int = 100,
+        page: int = 1,
+        before: int | None = None,
     ) -> list[dict[str, object]]:
         """List activities that occurred after a configured commuter rule began."""
 
+        params = {"after": after, "per_page": per_page}
+        if page != 1:
+            params["page"] = page
+        if before is not None:
+            params["before"] = before
         payload = await self._get_activity_json(
             "/athlete/activities",
             access_token,
-            params={"after": after, "per_page": per_page},
+            params=params,
         )
-        if not isinstance(payload, list) or not all(isinstance(activity, dict) for activity in payload):
+        if not isinstance(payload, list) or not all(
+            isinstance(activity, dict) for activity in payload
+        ):
             raise StravaAPIError("Strava returned an invalid activity list")
         return payload
+
+    async def get_activity_streams(
+        self, access_token: str, activity_id: int
+    ) -> dict[str, object]:
+        try:
+            payload = await self._get_activity_json(
+                f"/activities/{activity_id}/streams",
+                access_token,
+                params={
+                    "keys": "time,heartrate,moving,distance",
+                    "key_by_type": "true",
+                },
+            )
+        except StravaAPIError as exc:
+            if exc.status_code == 404:
+                return {}  # Detail exists, but this workout has no recorded streams.
+            raise
+        if not isinstance(payload, dict):
+            raise StravaAPIError("Strava returned invalid activity streams")
+        return payload
+
+    async def get_activity_zones(self, access_token: str, activity_id: int) -> dict:
+        """Read platform-reported zones without inventing personal thresholds."""
+        try:
+            payload = await self._get_activity_json(
+                f"/activities/{activity_id}/zones", access_token, params={}
+            )
+        except StravaAPIError as exc:
+            if exc.status_code in {402, 403, 404}:
+                return {
+                    "availability": {
+                        402: "subscription_required",
+                        403: "zones_not_authorized",
+                        404: "zones_unavailable",
+                    }[exc.status_code],
+                    "zones": [],
+                }
+            raise
+        if not isinstance(payload, list) or not all(
+            isinstance(z, dict) for z in payload
+        ):
+            raise StravaAPIError("Strava returned invalid activity zones")
+        return {"availability": "strava_reported", "zones": payload}
 
     async def get_activity(self, access_token: str, activity_id: int) -> dict[str, object]:
         """Fetch the current description and endpoint coordinates for an activity."""
@@ -108,17 +190,20 @@ class StravaClient:
             raise StravaAPIError("Strava returned an invalid activity")
         return payload
 
-    async def update_activity(self, access_token: str, activity_id: int, update: dict[str, object]) -> None:
+    async def update_activity(
+        self, access_token: str, activity_id: int, update: dict[str, object]
+    ) -> None:
         """Set commute metadata and the managed description block on an activity."""
 
         try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
+            async with self._activity_session() as client:
                 for retry_attempt in range(MAX_RATE_LIMIT_RETRIES + 1):
                     response = await client.put(
                         f"{self._settings.strava_api_base_url}/activities/{activity_id}",
                         headers=self._activity_headers(access_token),
                         json=update,
                     )
+                    self._observe_quota(response)
                     if response.status_code == 429:
                         await self._backoff_after_rate_limit(response, retry_attempt)
                         continue
@@ -135,28 +220,48 @@ class StravaClient:
         params: dict[str, object],
     ) -> object:
         try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
+            async with self._activity_session() as client:
                 for retry_attempt in range(MAX_RATE_LIMIT_RETRIES + 1):
                     response = await client.get(
                         f"{self._settings.strava_api_base_url}{path}",
                         headers=self._activity_headers(access_token),
                         params=params,
                     )
+                    self._observe_quota(response)
                     if response.status_code == 429:
                         await self._backoff_after_rate_limit(response, retry_attempt)
                         continue
                     response.raise_for_status()
                     return response.json()
         except (httpx.HTTPError, ValueError) as exc:
-            raise StravaAPIError(_activity_request_error(exc)) from exc
+            raise StravaAPIError(
+                _activity_request_error(exc),
+                exc.response.status_code
+                if isinstance(exc, httpx.HTTPStatusError)
+                else None,
+            ) from exc
 
         raise AssertionError("Rate-limit retry loop ended without returning or raising")
 
-    async def _backoff_after_rate_limit(self, response: httpx.Response, retry_attempt: int) -> None:
+    async def _backoff_after_rate_limit(
+        self, response: httpx.Response, retry_attempt: int
+    ) -> None:
         """Sleep for a short server-directed retry delay, or defer the poll."""
 
         retry_after_seconds = _rate_limit_backoff_seconds(response)
-        if retry_attempt >= MAX_RATE_LIMIT_RETRIES or retry_after_seconds > MAX_INLINE_RATE_LIMIT_BACKOFF_SECONDS:
+        if self._retry_at > time.time():
+            retry_after_seconds = max(
+                retry_after_seconds, math.ceil(self._retry_at - time.time())
+            )
+        if (
+            self.deadline is not None
+            and time.monotonic() + retry_after_seconds + 12 >= self.deadline
+        ):
+            raise StravaRateLimitError(retry_after_seconds)
+        if (
+            retry_attempt >= MAX_RATE_LIMIT_RETRIES
+            or retry_after_seconds > MAX_INLINE_RATE_LIMIT_BACKOFF_SECONDS
+        ):
             logger.info(
                 "Strava rate-limited; retry needs %s seconds and is deferred to the next scheduled poll",
                 retry_after_seconds,
@@ -169,6 +274,27 @@ class StravaClient:
             MAX_RATE_LIMIT_RETRIES,
         )
         await asyncio.sleep(retry_after_seconds)
+
+    def _observe_quota(self, response) -> None:
+        headers = getattr(response, "headers", {})
+        now = int(time.time())
+        delays = []
+        for prefix in ("X-RateLimit", "X-ReadRateLimit"):
+            try:
+                limits = [int(v) for v in headers[f"{prefix}-Limit"].split(",")]
+                usage = [int(v) for v in headers[f"{prefix}-Usage"].split(",")]
+                if len(limits) != 2 or len(usage) != 2:
+                    continue
+                if usage[0] >= limits[0]:
+                    delays.append(
+                        RATE_LIMIT_WINDOW_SECONDS - now % RATE_LIMIT_WINDOW_SECONDS + 1
+                    )
+                if usage[1] >= limits[1]:
+                    delays.append(86400 - now % 86400 + 1)
+            except (KeyError, TypeError, ValueError):
+                continue
+        if delays:
+            self._retry_at = now + max(delays)
 
     @staticmethod
     def _activity_headers(access_token: str) -> dict[str, str]:

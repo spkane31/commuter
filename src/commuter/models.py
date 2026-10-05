@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 GASOLINE_CO2_GRAMS_PER_GALLON = 8_887
 
@@ -83,3 +83,55 @@ class ActivityProcessing:
     cumulative_savings_cents: int | None
     co2_avoided_grams: int | None
     cumulative_co2_avoided_grams: int | None
+
+
+@dataclass
+class ActivityEnvelope:
+    """Source data and independently replaceable processor results for one workout."""
+
+    athlete_id: int
+    id: int
+    source: dict[str, object]
+    streams: dict[str, object] | None = None
+    effective_commute: bool = False
+    training: dict[str, object] = field(default_factory=dict)
+    source_version: str = ""
+    reported_zones: list[dict[str, object]] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class ZoneBoundary:
+    name: str
+    lower_bpm: float
+    upper_bpm: float | None
+
+
+@dataclass(frozen=True)
+class ZoneSettings:
+    sport: str
+    effective_from: str
+    version: str
+    boundaries: tuple[ZoneBoundary, ...]
+    confirmed: bool
+    max_gap_s: float
+    method_source: str
+    retrospective: bool = False
+
+
+@dataclass(frozen=True)
+class RollingMeasurement:
+    time_s: float
+    heart_rate_bpm: float | None
+    pace_s_km: float | None
+    interval_s: float
+    distance_m: float | None
+    moving: bool | None
+
+
+@dataclass(frozen=True)
+class ZoneResult:
+    seconds: dict[str, float]
+    classified_s: float
+    unknown_s: float
+    pace_time_s: dict[str, float]
+    pace_distance_m: dict[str, float]

@@ -6,15 +6,24 @@ import logging
 import math
 import re
 from dataclasses import dataclass, field
-from decimal import Decimal, ROUND_HALF_UP
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Any, Protocol
 
-from commuter.models import GASOLINE_CO2_GRAMS_PER_GALLON, ActivityProcessing, CommuteConfiguration, Coordinate, Location
+from commuter.models import (
+    GASOLINE_CO2_GRAMS_PER_GALLON,
+    ActivityEnvelope,
+    CommuteConfiguration,
+    Coordinate,
+    Location,
+)
+from commuter.pipeline import ProcessingContext
 from commuter.store import CredentialStore
 
 EARTH_RADIUS_M = 6_371_000
 METERS_PER_MILE = Decimal("1609.344")
-MANAGED_BLOCK_PATTERN = re.compile(r"--- Commuter ---\n.*?\n--- /Commuter ---", re.DOTALL)
+MANAGED_BLOCK_PATTERN = re.compile(
+    r"--- Commuter ---\n.*?\n--- /Commuter ---", re.DOTALL
+)
 logger = logging.getLogger(__name__)
 
 
@@ -101,30 +110,35 @@ async def synchronize_commutes(
     recheck_non_matches: bool = False,
     verbose: bool = False,
 ) -> SyncResult:
-    """Evaluate candidate rides and make each configured update at most once.
+    """Compatibility entry point for the existing commuter-only poller."""
 
-    By default candidates are limited to rides after the rule was created.
-    ``after`` supports an owner-requested historical backfill.  A dry run
-    reads Strava only: it does not update Strava or write local processing
-    state. ``recheck_non_matches`` re-evaluates activities that a prior run
-    stored as non-matches, and ``verbose`` logs each decision without secrets.
-    """
+    from commuter.pipeline import ProcessingContext, build_pipeline
 
     result = SyncResult()
+    pipeline = build_pipeline(("commuter",))
     for account in store.list_accounts():
         configuration = store.get_commute_configuration(account.athlete.id)
         if configuration is None:
             result.unconfigured_athlete_ids.append(account.athlete.id)
             continue
-
         validate_commute_configuration(configuration)
-        cumulative_savings_cents = configuration.cumulative_savings_cents
-        cumulative_co2_avoided_grams = configuration.cumulative_co2_avoided_grams
         access_token = await token_manager.get_access_token(account.athlete.id)
         summaries = await strava_client.list_athlete_activities(
             access_token,
             after=after if after is not None else configuration.created_at,
             per_page=100,
+        )
+        context = ProcessingContext(
+            store=store,
+            token_manager=token_manager,
+            strava_client=strava_client,
+            notifier=notifier,
+            configuration=configuration,
+            commute_result=result,
+            dry_run=dry_run,
+            recheck_non_matches=recheck_non_matches,
+            verbose=verbose,
+            commute_after=after,
         )
         for summary in sorted(summaries, key=_activity_sort_key):
             activity_id = _activity_id(summary)
@@ -132,106 +146,174 @@ async def synchronize_commutes(
                 continue
             previous = store.get_activity_processing(account.athlete.id, activity_id)
             if previous is not None and previous.status != "pending":
-                if previous.status == "not_commute" and (
-                    recheck_non_matches or _summary_is_strava_commute(summary)
+                if not (
+                    previous.status == "not_commute"
+                    and (recheck_non_matches or _summary_is_strava_commute(summary))
                 ):
-                    previous = None
-                else:
-                    if verbose:
-                        logger.info("activity=%s skipped: previously %s", activity_id, previous.status)
                     continue
-
             payload = await strava_client.get_activity(access_token, activity_id)
-            activity = _activity_from_payload(payload)
-            if activity.id != activity_id:
-                raise CommuteConfigurationError("Strava returned an activity with an unexpected identifier")
+            await pipeline.process(
+                context, ActivityEnvelope(account.athlete.id, activity_id, payload)
+            )
+    return result
 
-            reservation = previous
-            if reservation is None:
-                decision = commute_decision(activity, configuration)
-                if verbose:
-                    if decision.matches:
-                        logger.info("activity=%s matches: %s", activity_id, decision.reason)
-                    else:
-                        logger.info(
-                            "activity=%s date=%s type=%s distance=%s does not match: %s",
-                            activity_id,
-                            activity.activity_date or "unknown",
-                            activity.sport_type or "unknown",
-                            _format_activity_distance(activity.distance_m),
-                            decision.reason,
-                        )
-                if not decision.matches:
-                    if not dry_run:
-                        store.mark_activity_not_commute(account.athlete.id, activity_id)
-                    result.non_matching_activity_ids.append(activity_id)
-                    continue
-                if dry_run:
-                    result.would_update_activity_ids.append(activity_id)
-                    continue
-                savings_cents = calculate_savings_cents(configuration, activity.distance_m)
-                activity_cumulative_savings_cents = cumulative_savings_cents + savings_cents
-                co2_avoided_grams = calculate_co2_avoided_grams(configuration, activity.distance_m)
-                activity_cumulative_co2_avoided_grams = cumulative_co2_avoided_grams + co2_avoided_grams
-            elif verbose:
-                logger.info("activity=%s matches: retrying a pending Commuter update", activity_id)
 
-            if reservation is not None:
-                if (
-                    reservation.savings_cents is None
-                    or reservation.cumulative_savings_cents is None
-                    or reservation.co2_avoided_grams is None
-                    or reservation.cumulative_co2_avoided_grams is None
-                ):
-                    raise CommuteConfigurationError("Stored commute processing state is invalid")
-                savings_cents = reservation.savings_cents
-                activity_cumulative_savings_cents = reservation.cumulative_savings_cents
-                co2_avoided_grams = reservation.co2_avoided_grams
-                activity_cumulative_co2_avoided_grams = reservation.cumulative_co2_avoided_grams
+class CommuteProcessor:
+    """Apply existing commute mutations; leave noncommutes for the next stage."""
 
+    name = "commuter"
+
+    async def process(
+        self, context: ProcessingContext, envelope: ActivityEnvelope
+    ) -> ActivityEnvelope:
+        store = context.store
+        configuration = context.configuration
+        if store is None or configuration is None:
+            return envelope
+        result = context.commute_result or SyncResult()
+        strava_client, notifier = context.strava_client, context.notifier
+        dry_run, verbose = context.dry_run, context.verbose
+        activity = _activity_from_payload(envelope.source)
+        if activity.id != envelope.id:
+            raise CommuteConfigurationError(
+                "Strava returned an activity with an unexpected identifier"
+            )
+        envelope.effective_commute = activity.commute
+        previous = store.get_activity_processing(envelope.athlete_id, envelope.id)
+        if previous is not None and previous.status == "completed":
+            envelope.effective_commute = True
+            return envelope
+        if previous is not None and previous.status == "not_commute":
+            if not (context.recheck_non_matches or activity.commute):
+                return envelope
+            previous = None
+        start_date = envelope.source.get("start_date")
+        if isinstance(start_date, str):
+            from datetime import datetime
+
+            timestamp = datetime.fromisoformat(
+                start_date.replace("Z", "+00:00")
+            ).timestamp()
+            if timestamp <= (
+                context.commute_after
+                if context.commute_after is not None
+                else configuration.created_at
+            ):
+                return envelope
+        current = store.get_commute_configuration(envelope.athlete_id)
+        cumulative_savings_cents = current.cumulative_savings_cents
+        cumulative_co2_avoided_grams = current.cumulative_co2_avoided_grams
+        if context.token_manager is None or strava_client is None or notifier is None:
+            raise CommuteConfigurationError(
+                "Commute processor dependencies are missing"
+            )
+        access_token = await context.token_manager.get_access_token(envelope.athlete_id)
+        activity_id = envelope.id
+        reservation = previous
+        if reservation is None:
+            decision = commute_decision(activity, configuration)
+            if verbose:
+                if decision.matches:
+                    logger.info("activity=%s matches: %s", activity_id, decision.reason)
+                else:
+                    logger.info(
+                        "activity=%s date=%s type=%s distance=%s does not match: %s",
+                        activity_id,
+                        activity.activity_date or "unknown",
+                        activity.sport_type or "unknown",
+                        _format_activity_distance(activity.distance_m),
+                        decision.reason,
+                    )
+            if not decision.matches:
+                if not dry_run:
+                    store.mark_activity_not_commute(envelope.athlete_id, activity_id)
+                result.non_matching_activity_ids.append(activity_id)
+                return envelope
             if dry_run:
                 result.would_update_activity_ids.append(activity_id)
-                continue
-
-            update: dict[str, object] = {
-                "commute": True,
-                "hide_from_home": True,
-                "description": merge_commuter_block(
-                    description=activity.description,
-                    configuration=configuration,
-                    distance_m=activity.distance_m,
-                    savings_cents=savings_cents,
-                    cumulative_savings_cents=activity_cumulative_savings_cents,
-                    co2_avoided_grams=co2_avoided_grams,
-                    cumulative_co2_avoided_grams=activity_cumulative_co2_avoided_grams,
-                ),
-            }
-            await strava_client.update_activity(access_token, activity_id, update)
-            await notifier.activity_updated(
-                activity_id=activity_id,
-                estimated_savings=_format_currency(savings_cents, configuration.currency),
-                cumulative_savings=_format_currency(activity_cumulative_savings_cents, configuration.currency),
-                co2_avoided=_format_co2_avoided(co2_avoided_grams),
-                cumulative_co2_avoided=_format_co2_avoided(activity_cumulative_co2_avoided_grams),
+                return envelope
+            savings_cents = calculate_savings_cents(configuration, activity.distance_m)
+            activity_cumulative_savings_cents = cumulative_savings_cents + savings_cents
+            co2_avoided_grams = calculate_co2_avoided_grams(
+                configuration, activity.distance_m
             )
-            if reservation is None:
-                reservation = store.reserve_commute_activity(
-                    athlete_id=account.athlete.id,
-                    activity_id=activity_id,
-                    savings_cents=savings_cents,
-                    co2_avoided_grams=co2_avoided_grams,
-                )
-                if (
-                    reservation.cumulative_savings_cents != activity_cumulative_savings_cents
-                    or reservation.cumulative_co2_avoided_grams != activity_cumulative_co2_avoided_grams
-                ):
-                    raise CommuteConfigurationError("Commute savings total changed during synchronization")
-            store.mark_activity_completed(account.athlete.id, activity_id)
-            cumulative_savings_cents = activity_cumulative_savings_cents
-            cumulative_co2_avoided_grams = activity_cumulative_co2_avoided_grams
-            result.updated_activity_ids.append(activity_id)
+            activity_cumulative_co2_avoided_grams = (
+                cumulative_co2_avoided_grams + co2_avoided_grams
+            )
+        elif verbose:
+            logger.info(
+                "activity=%s matches: retrying a pending Commuter update", activity_id
+            )
 
-    return result
+        if reservation is not None:
+            if (
+                reservation.savings_cents is None
+                or reservation.cumulative_savings_cents is None
+                or reservation.co2_avoided_grams is None
+                or reservation.cumulative_co2_avoided_grams is None
+            ):
+                raise CommuteConfigurationError(
+                    "Stored commute processing state is invalid"
+                )
+            savings_cents = reservation.savings_cents
+            activity_cumulative_savings_cents = reservation.cumulative_savings_cents
+            co2_avoided_grams = reservation.co2_avoided_grams
+            activity_cumulative_co2_avoided_grams = (
+                reservation.cumulative_co2_avoided_grams
+            )
+
+        if dry_run:
+            result.would_update_activity_ids.append(activity_id)
+            return envelope
+
+        update: dict[str, object] = {
+            "commute": True,
+            "hide_from_home": True,
+            "description": merge_commuter_block(
+                description=activity.description,
+                configuration=configuration,
+                distance_m=activity.distance_m,
+                savings_cents=savings_cents,
+                cumulative_savings_cents=activity_cumulative_savings_cents,
+                co2_avoided_grams=co2_avoided_grams,
+                cumulative_co2_avoided_grams=activity_cumulative_co2_avoided_grams,
+            ),
+        }
+        await strava_client.update_activity(access_token, activity_id, update)
+        await notifier.activity_updated(
+            activity_id=activity_id,
+            estimated_savings=_format_currency(savings_cents, configuration.currency),
+            cumulative_savings=_format_currency(
+                activity_cumulative_savings_cents, configuration.currency
+            ),
+            co2_avoided=_format_co2_avoided(co2_avoided_grams),
+            cumulative_co2_avoided=_format_co2_avoided(
+                activity_cumulative_co2_avoided_grams
+            ),
+        )
+        if reservation is None:
+            reservation = store.reserve_commute_activity(
+                athlete_id=envelope.athlete_id,
+                activity_id=activity_id,
+                savings_cents=savings_cents,
+                co2_avoided_grams=co2_avoided_grams,
+            )
+            if (
+                reservation.cumulative_savings_cents
+                != activity_cumulative_savings_cents
+                or reservation.cumulative_co2_avoided_grams
+                != activity_cumulative_co2_avoided_grams
+            ):
+                raise CommuteConfigurationError(
+                    "Commute savings total changed during synchronization"
+                )
+        store.mark_activity_completed(envelope.athlete_id, activity_id)
+        cumulative_savings_cents = activity_cumulative_savings_cents
+        cumulative_co2_avoided_grams = activity_cumulative_co2_avoided_grams
+        result.updated_activity_ids.append(activity_id)
+
+        envelope.effective_commute = True
+        return envelope
 
 
 def validate_commute_configuration(configuration: CommuteConfiguration) -> None:

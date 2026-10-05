@@ -333,3 +333,227 @@ wipe` removes the database when the Pi or service is retired.
 - Automatic gas-price and vehicle-economy sources
 - Google Routes driving-distance calculation and map picker
 - Backfills, multi-athlete onboarding, a browser extension, and public hosting
+
+
+## Training export to Google Sheets
+
+Two processors run in declaration order: `CommuteProcessor`, then
+`TrainingSheetsProcessor`. Each receives `context` first and the updated activity
+second. Training-only commands do not edit Strava, notify Discord, or change
+commute savings. Existing home/work configurations remain readable.
+
+Install the locked dependencies with `uv sync --frozen --group dev`. Enable the
+Sheets API, share the target workbook with the service-account email as an
+editor, and keep its JSON credentials outside version control. The adapter uses
+the official Google SDK with the `https://www.googleapis.com/auth/spreadsheets`
+scope; scheduled runs require no browser. Example private configuration:
+
+```dotenv
+COMMUTER_SHEETS_ENABLED=true
+COMMUTER_SPREADSHEET_ID=YOUR_WORKBOOK_ID
+COMMUTER_ACTIVITY_SHEET=RAW DATA
+GOOGLE_APPLICATION_CREDENTIALS=/absolute/private/path/credentials.json
+COMMUTER_TRAINING_CACHE_DIR=/absolute/private/path/training-cache
+COMMUTER_REPORTING_TIMEZONE=America/Denver
+COMMUTER_TRAINING_RECENT_DAYS=7
+COMMUTER_TRAINING_MAX_ACTIVITIES=5
+COMMUTER_TRAINING_TIME_BUDGET_S=90
+```
+
+Protect the environment and credential files with mode `0600`. `credentials.json`
+is ignored by Git. Local defaults use `training-cache` alongside the configured
+database and a worksheet named `Activities` if no activity title is supplied.
+
+```sh
+uv run commuter sheets-setup
+uv run commuter training-backfill --months 2
+uv run commuter training-backfill --resume
+uv run commuter sync --processors sheets
+uv run commuter sync --processors commuter,sheets
+uv run commuter training-refresh --activity-id ACTIVITY_ID
+uv run commuter training-recalculate
+uv run commuter training-reconcile
+```
+
+Backfill captures exact timestamps two calendar months apart and resumes that
+same range. Sync and backfill process bounded batches; repeat them when `pending=True`.
+`training-recalculate` without `--max-activities` processes all cached data,
+automatically continuing after a batch reaches its time budget. Specify
+`--max-activities` to process only a bounded batch. Errors stop the command with
+remaining work saved for resumption; a batch that makes no progress also stops.
+Dry runs remain bounded by the run time budget and do not auto-resume.
+Sheets requests retry HTTP 429 and transient server errors up to seven times.
+Retries honor `Retry-After` (seconds or an HTTP date) and use exponential backoff
+with jitter, capped at 64 seconds, when no longer server delay is specified.
+All Sheets requests in the run respect the cooldown. If the wait cannot fit
+within `COMMUTER_TRAINING_TIME_BUDGET_S`, the export stays pending for a later run.
+For larger recalculation batches, allow more time for quota recovery:
+
+```sh
+COMMUTER_TRAINING_TIME_BUDGET_S=300 uv run commuter training-recalculate --max-activities 20
+```
+
+Repeat the same command until `pending=False`; completed rows are upserted safely.
+A normal Sheets-enabled `sync` selects both processors, refreshes the last seven
+days, resumes an existing backfill when its remaining budget permits, and performs
+weekly full-ID reconciliation after backfill starts. Missing IDs become pending
+review; `training-remove --activity-id ACTIVITY_ID` confirms a reporting tombstone.
+That command does not delete a Strava activity. `--dry-run` computes results
+without exporting or changing processing/cache checkpoints. It still reads APIs
+and may refresh an expired credential.
+
+Keep the existing 15-minute systemd timer; no second scheduler is needed. On the
+Pi, put the above settings in `/etc/commuter/commuter.env`, use absolute writable
+state paths under `/var/lib/commuter`, and install locked dependencies in the
+service's Python 3.13 environment. Run setup and the first backfill with that
+same environment file loaded. Back up the database, private configuration,
+Google credentials, and application-owned raw cache using the existing backup
+process. Actual Pi installation/restart checks require access to that host.
+
+### Measurements and ownership
+
+`RAW DATA` (or the configured activity tab) has one row per text Strava ID.
+Distances use metres; durations and pace use seconds, HR uses bpm, and running
+miles use metres / 1609.344. Dates are ISO text: UTC timestamps include a UTC
+explicit offset, reporting dates/weeks use `YYYY-MM-DD`, and weeks begin Monday
+in the configured timezone. Real zeros remain numeric; missing measurements are
+blank with availability columns. Schema version `1` uses stable column order.
+
+HR uses a trailing time-weighted window of **up to three available seconds**.
+One or two trusted seconds are usable at startup or after an invalid interval;
+a full three seconds is used whenever available. Each HR sample holds until
+the next timestamp, and distance is interpolated linearly within recorded
+intervals. Pace requires trusted distance and continuous movement. Windows
+reset after invalid measurements, recording gaps, or pauses for pace; nothing
+is extrapolated beyond the final sample.
+
+The automatic recording-gap cutoff is the larger of three seconds and three
+times the recording's median positive timestamp interval. Thus ordinary
+four-second recordings use a twelve-second cutoff; longer gaps remain unknown.
+`COMMUTER_TRAINING_MAX_GAP_S` or a selected dated zone setting can override it.
+`recording_gap_cutoff_s` records the actual cutoff, `rolling_window_s` records
+the maximum window, and method version `hr-pace-available-trailing-3s-v2`
+identifies the calculation. Sparse-sample interpolation is an estimate within
+the accepted recording cadence, rather than extra measured samples.
+
+The activity row retains Strava average/max HR and workout moving/elapsed pace
+separately from rolling measurements. Its rolling HR mean weights valid rolling
+samples by interval duration; rolling pace aggregates matched valid duration and
+speed-derived distance. Raw per-sample time/HR/distance/movement streams remain
+in owner-only cache files, indexed by athlete/activity ID. The workbook stores
+activity summaries and later per-zone totals, rather than sample arrays.
+
+Strava's reported running and cycling HR zones are fetched with each activity,
+cached, and exported in `Strava HR Zones`, including the exact returned bpm
+bounds, seconds, sport, sensor flag, and boundary version. These results use
+method `strava-reported-v1`; they are platform calculations, independent of our
+rolling algorithm and any review of your personal thresholds. In the absence
+of confirmed custom settings, they also populate `Zone Time`, weekly summaries,
+and HR charts. Unassigned elapsed duration is shown separately as unknown.
+A missing or restricted Strava zone response stays unavailable; measurements
+still export. Running and cycling may have different returned boundaries.
+For manual inspection, `Analysis!A7:E` contains a deduplicated catalog of the
+imported boundaries by sport, zone, and settings version. Bounds are numeric;
+a blank upper bound means unbounded. Older imported versions remain visible.
+Python owns this catalog range and refuses to expand it into occupied user
+cells. Keep formulas and manual analyses outside this reserved range.
+
+Leave `Settings` empty to use those platform results without choosing a custom
+zone method. Later, supply one row per zone with sport `run`
+or `cycling`, effective date, version, lower/upper bpm, confirmation, recording-gap
+cutoff, method source, and retrospective flag. Boundaries must be contiguous and
+ordered, with inclusive lower and exclusive upper bounds; a blank upper bound
+is allowed for the final zone. Confirm personal methods/boundaries before marking
+settings confirmed. Current settings applied retrospectively must be labelled.
+`effective_from` is the earliest activity date that uses these boundaries, not
+the date you entered them. The `retrospective` flag labels historical use; it
+does not override that cutoff. To apply current boundaries to all imported
+history, set the date on every zone row for each sport to the earliest imported
+activity date (for example, `2026-07-11`), and set `retrospective` to `TRUE`.
+Earlier workouts otherwise retain Strava-reported zones when available.
+
+Settings edits take effect when an activity is processed again. Recalculate
+cached activities and their Dashboard summaries with:
+
+```sh
+uv run commuter training-recalculate
+```
+
+Cached recalculation makes no Strava requests. Omit `--max-activities` to finish
+all cached data in one command; use it for resumable bounded batches.
+Existing Z1–Z5 boundaries do not require rebuilding charts.
+Custom-calculated zone duration uses recorded elapsed stream time; valid percentages
+use classified seconds, excluding unknown time. Moving and elapsed workout
+seconds remain visible. Weekly ratios use aggregated matched inputs instead of
+averaging workout percentages or paces. Different settings versions are separate
+in zone summaries and chart labels.
+
+Python owns reporting tables, summary/chart source tables, and `Sync Log`.
+Keep manual category/source overrides, notes, and RPE in `Manual Inputs`, keyed by
+text activity ID. Overrides change reporting, not commute side effects. Edit
+formulas and additional analyses in `Analysis` or separate tabs. Ordinary sync
+preserves those formulas, formatting, and chart edits; explicit
+`--refresh-charts` replaces only recorded managed chart IDs. Do not reorder
+writer-owned columns. Row sorting is supported because indexes are rebuilt;
+duplicate IDs or incompatible headers stop export.
+
+Exports upsert by activity ID, replace obsolete zone rows, and clear stale cells.
+A shared process lock prevents overlapping local writers. Activity completion
+follows raw writes and rebuilt summaries; a crash can replay the same IDs safely.
+Quota limits come from Strava headers; throttled work remains resumable. `Sync Log`
+distinguishes partial attempts from the last fully successful sync. Disconnect
+and local wipe also remove application-owned cached streams; existing Sheets
+rows and Discord messages remain separately managed. The existing commute path
+can repeat a Discord notification after a crash between notification and local
+completion; it does not guarantee exactly-once remote delivery.
+
+Advanced training-load methods and webhook delivery are deferred. Live validation
+of zone calculations against Garmin/Strava remains pending personal boundaries.
+
+### Dashboard range and duration charts
+
+Dashboard weekly and duration charts cover the current Monday-based week and the preceding eleven
+weeks in the reporting timezone. Weekly totals include duration by category,
+running mileage, non-commute minutes, and sport-separated HR zone minutes.
+The duration stack includes running, virtual biking, bike commutes, other
+biking, and other activities. Each stack shows total moving minutes including
+commutes; the non-commute training chart excludes flagged commutes and Strava
+Hike activities. Hikes remain visible in RAW DATA and the all-activity duration
+stack, but do not contribute to training duration, rolling run/bike duration,
+running mileage, or HR zone summaries and pies, even with a category override.
+Other activity types retain their existing behavior.
+Minute labels use one decimal place while stored values retain full precision.
+The Chart Data schema appends other-biking and other-activity columns without
+moving existing chart inputs.
+Daily line charts show trailing seven-calendar-day moving minutes for running
+and non-commute biking (virtual and outdoor rides). Commute flags and the
+`bike_commute` category exclude a ride from these non-commute totals. Missing
+activities cannot be inferred from an empty calendar day.
+
+Three pie charts show running, non-commute biking, and combined HR zone minutes
+for today and the previous six reporting calendar dates. They exclude both
+source/effective commute flags and the commute category. Biking includes
+virtual and outdoor rides. Unknown/unassigned elapsed time is a separate slice,
+including workouts with missing HR. Combined slices sum sport-relative zone
+labels using each sport's own boundaries; they do not imply identical bpm
+ranges. Sources rebuild from current activities and zone rows on each sync.
+
+`commuter sheets-setup` adds the new pies to an existing Dashboard without
+recreating existing charts. Once registered, a manually deleted pie stays
+deleted during ordinary setup/sync. The default layout omits the weekly commute
+HR chart. `--refresh-charts` explicitly recreates the managed layout.
+
+The weekly rolling pace chart has been removed; its existing source column
+remains reserved to preserve column order. Ordinary sync refreshes chart data
+without recreating user-edited charts. To apply this Dashboard layout once:
+
+```bash
+commuter sheets-setup --refresh-charts
+commuter training-backfill --months 3 --max-activities 20
+```
+
+The three-month backfill has its own fixed, resumable checkpoint, preserving
+the original two-month import. It also provides the six seed days needed for
+the first seven-day total. Repeat the command until pending work is complete;
+historical backfill reuses cached details/streams and fetches missing zone data.
+Use `training-refresh --activity-id ID` to refetch an older edited activity.

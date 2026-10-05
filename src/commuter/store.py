@@ -9,13 +9,22 @@ import threading
 import time
 from pathlib import Path
 
-from commuter.models import Account, ActivityProcessing, Athlete, CommuteConfiguration, Coordinate, Location, TokenSet
+from commuter.models import (
+    Account,
+    ActivityProcessing,
+    Athlete,
+    CommuteConfiguration,
+    Coordinate,
+    Location,
+    TokenSet,
+)
 
 
 class CredentialStore:
     """Store OAuth credentials in an owner-only local SQLite database."""
 
     def __init__(self, database_path: Path) -> None:
+        self.database_path = database_path
         database_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         self._connection = sqlite3.connect(database_path, check_same_thread=False)
         self._connection.row_factory = sqlite3.Row
@@ -88,9 +97,21 @@ class CredentialStore:
         """Permanently delete a local athlete record and its credentials."""
 
         with self._lock, self._connection:
-            self._connection.execute("DELETE FROM activity_processing WHERE athlete_id = ?", (athlete_id,))
-            self._connection.execute("DELETE FROM commute_configurations WHERE athlete_id = ?", (athlete_id,))
-            self._connection.execute("DELETE FROM accounts WHERE athlete_id = ?", (athlete_id,))
+            self._connection.execute(
+                "DELETE FROM training_processing WHERE athlete_id = ?", (athlete_id,)
+            )
+            self._connection.execute(
+                "DELETE FROM training_progress WHERE athlete_id = ?", (athlete_id,)
+            )
+            self._connection.execute(
+                "DELETE FROM activity_processing WHERE athlete_id = ?", (athlete_id,)
+            )
+            self._connection.execute(
+                "DELETE FROM commute_configurations WHERE athlete_id = ?", (athlete_id,)
+            )
+            self._connection.execute(
+                "DELETE FROM accounts WHERE athlete_id = ?", (athlete_id,)
+            )
 
     def save_commute_configuration(self, configuration: CommuteConfiguration) -> None:
         """Save owner-entered commute settings without resetting the total."""
@@ -308,6 +329,76 @@ class CredentialStore:
                 (athlete_id, activity_id, now, now),
             )
 
+    def save_training_state(
+        self,
+        athlete_id: int,
+        activity_id: int,
+        workbook: str,
+        status: str,
+        source_version: str = "",
+        settings_version: str = "",
+        error: str = "",
+    ) -> None:
+        """Record independent training progress without modifying commuter outcomes."""
+
+        with self._lock, self._connection:
+            self._connection.execute(
+                "INSERT INTO training_processing VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(athlete_id, activity_id, workbook) DO UPDATE SET "
+                "status=excluded.status, source_version=excluded.source_version, "
+                "settings_version=excluded.settings_version, error=excluded.error, updated_at=excluded.updated_at",
+                (
+                    athlete_id,
+                    activity_id,
+                    workbook,
+                    status,
+                    source_version,
+                    settings_version,
+                    error,
+                    int(time.time()),
+                ),
+            )
+
+    def get_training_state(
+        self, athlete_id: int, activity_id: int, workbook: str
+    ) -> dict[str, object] | None:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT * FROM training_processing WHERE athlete_id=? AND activity_id=? AND workbook=?",
+                (athlete_id, activity_id, workbook),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def training_states(
+        self, athlete_id: int, workbook: str
+    ) -> list[dict[str, object]]:
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT * FROM training_processing WHERE athlete_id=? AND workbook=?",
+                (athlete_id, workbook),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def save_progress(
+        self, athlete_id: int, workbook: str, name: str, value: dict[str, object]
+    ) -> None:
+        with self._lock, self._connection:
+            self._connection.execute(
+                "INSERT INTO training_progress VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(athlete_id, workbook, name) DO UPDATE SET value=excluded.value",
+                (athlete_id, workbook, name, json.dumps(value, allow_nan=False)),
+            )
+
+    def get_progress(
+        self, athlete_id: int, workbook: str, name: str
+    ) -> dict[str, object] | None:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT value FROM training_progress WHERE athlete_id=? AND workbook=? AND name=?",
+                (athlete_id, workbook, name),
+            ).fetchone()
+        return json.loads(row["value"]) if row else None
+
     def close(self) -> None:
         """Close the SQLite connection."""
 
@@ -316,6 +407,17 @@ class CredentialStore:
 
     def _initialize_schema(self) -> None:
         with self._lock, self._connection:
+            self._connection.execute(
+                "CREATE TABLE IF NOT EXISTS training_processing ("
+                "athlete_id INTEGER NOT NULL, activity_id INTEGER NOT NULL, workbook TEXT NOT NULL, "
+                "status TEXT NOT NULL, source_version TEXT NOT NULL, settings_version TEXT NOT NULL, "
+                "error TEXT NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY (athlete_id, activity_id, workbook))"
+            )
+            self._connection.execute(
+                "CREATE TABLE IF NOT EXISTS training_progress (athlete_id INTEGER NOT NULL, "
+                "workbook TEXT NOT NULL, name TEXT NOT NULL, value TEXT NOT NULL, "
+                "PRIMARY KEY (athlete_id, workbook, name))"
+            )
             self._connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS accounts (
@@ -363,8 +465,12 @@ class CredentialStore:
                 "cumulative_co2_avoided_grams",
                 "INTEGER NOT NULL DEFAULT 0",
             )
-            self._add_column_if_missing("activity_processing", "co2_avoided_grams", "INTEGER")
-            self._add_column_if_missing("activity_processing", "cumulative_co2_avoided_grams", "INTEGER")
+            self._add_column_if_missing(
+                "activity_processing", "co2_avoided_grams", "INTEGER"
+            )
+            self._add_column_if_missing(
+                "activity_processing", "cumulative_co2_avoided_grams", "INTEGER"
+            )
 
     def _add_column_if_missing(self, table: str, column: str, definition: str) -> None:
         """Apply the narrow additive schema migrations needed by this local database."""
@@ -372,6 +478,7 @@ class CredentialStore:
         columns = {row["name"] for row in self._connection.execute(f"PRAGMA table_info({table})")}
         if column not in columns:
             self._connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
 
 def _serialize_commute_configuration(configuration: CommuteConfiguration) -> str:
     """Encode owner-entered settings for SQLite."""
@@ -407,10 +514,18 @@ def _deserialize_commute_configuration(
 
     try:
         payload = json.loads(value)
+        # Preserve settings saved by the original two-endpoint release.
+        if "locations" not in payload:
+            payload["locations"] = [
+                {"name": name, **payload[name]} for name in ("home", "work")
+            ]
         locations = tuple(
             Location(
                 name=str(location["name"]),
-                coordinate=Coordinate(latitude=float(location["latitude"]), longitude=float(location["longitude"])),
+                coordinate=Coordinate(
+                    latitude=float(location["latitude"]),
+                    longitude=float(location["longitude"]),
+                ),
             )
             for location in payload["locations"]
         )

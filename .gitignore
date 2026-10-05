@@ -32,3 +32,8 @@ htmlcov/
 commuter.db
 commuter.db-shm
 commuter.db-wal
+training-cache/
+*.sync.lock
+*.token.lock
+
+credentials.json

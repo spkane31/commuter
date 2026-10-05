@@ -6,6 +6,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+
 class ConfigurationError(ValueError):
     """Raised when required local configuration is missing or invalid."""
 
@@ -25,6 +26,23 @@ class Settings:
     strava_token_url: str = "https://www.strava.com/oauth/token"
     strava_revoke_url: str = "https://www.strava.com/oauth/revoke"
     strava_api_base_url: str = "https://www.strava.com/api/v3"
+    sheets_enabled: bool = False
+    spreadsheet_id: str = ""
+    activity_sheet_name: str = "Activities"
+    google_credentials_path: Path | None = None
+    training_cache_directory: Path | None = None
+    reporting_timezone: str = "America/Denver"
+    training_recent_days: int = 7
+    training_max_activities: int = 5
+    training_time_budget_s: int = 90
+    training_max_gap_s: float | None = None
+
+    @property
+    def cache_directory(self) -> Path:
+        return (
+            self.training_cache_directory
+            or self.database_path.parent / "training-cache"
+        )
 
     def __post_init__(self) -> None:
         if not self.strava_client_id:
@@ -59,7 +77,33 @@ class Settings:
             discord_bot_token=os.environ.get("DISCORD_BOT_TOKEN", "").strip(),
             discord_guild_id=os.environ.get("DISCORD_GUILD_ID", "").strip(),
             discord_channel_id=os.environ.get("DISCORD_CHANNEL_ID", "").strip(),
+            sheets_enabled=os.environ.get("COMMUTER_SHEETS_ENABLED", "false").lower()
+            == "true",
+            spreadsheet_id=os.environ.get("COMMUTER_SPREADSHEET_ID", "").strip(),
+            activity_sheet_name=os.environ.get("COMMUTER_ACTIVITY_SHEET", "Activities"),
+            google_credentials_path=Path(os.environ["GOOGLE_APPLICATION_CREDENTIALS"])
+            if os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+            else None,
+            training_cache_directory=Path(os.environ["COMMUTER_TRAINING_CACHE_DIR"])
+            if os.environ.get("COMMUTER_TRAINING_CACHE_DIR")
+            else None,
+            reporting_timezone=os.environ.get(
+                "COMMUTER_REPORTING_TIMEZONE", "America/Denver"
+            ),
+            training_recent_days=int(
+                os.environ.get("COMMUTER_TRAINING_RECENT_DAYS", "7")
+            ),
+            training_max_activities=int(
+                os.environ.get("COMMUTER_TRAINING_MAX_ACTIVITIES", "5")
+            ),
+            training_time_budget_s=int(
+                os.environ.get("COMMUTER_TRAINING_TIME_BUDGET_S", "90")
+            ),
+            training_max_gap_s=float(os.environ["COMMUTER_TRAINING_MAX_GAP_S"])
+            if os.environ.get("COMMUTER_TRAINING_MAX_GAP_S")
+            else None,
         )
+
 
 def _required_environment_value(name: str) -> str:
     value = os.environ.get(name, "").strip()

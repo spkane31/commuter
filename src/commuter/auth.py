@@ -60,14 +60,23 @@ class TokenManager:
         account = self._require_account(athlete_id)
         if account.expires_at > int(time.time()) + 60:
             return account.access_token
+        from commuter.state import process_lock
 
-        refreshed = await self._strava_client.refresh_access_token(account.refresh_token)
-        self._store.save_account(
-            athlete=refreshed.athlete or account.athlete,
-            scopes=account.scopes,
-            tokens=refreshed,
-        )
-        return refreshed.access_token
+        with process_lock(
+            self._store.database_path.with_suffix(f".{athlete_id}.token.lock")
+        ):
+            account = self._require_account(athlete_id)
+            if account.expires_at > int(time.time()) + 60:
+                return account.access_token
+            refreshed = await self._strava_client.refresh_access_token(
+                account.refresh_token
+            )
+            self._store.save_account(
+                athlete=refreshed.athlete or account.athlete,
+                scopes=account.scopes,
+                tokens=refreshed,
+            )
+            return refreshed.access_token
 
     def _require_account(self, athlete_id: int) -> Account:
         account = self._store.get_account(athlete_id)

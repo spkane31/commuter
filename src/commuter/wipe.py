@@ -34,6 +34,13 @@ async def wipe_local_state(
     explicit force option removes local state even when revocation is impossible.
     """
 
+    from commuter.state import process_lock
+
+    with process_lock(settings.database_path.with_suffix(".sync.lock")):
+        return await _wipe_local_state(settings, strava_client, force_local=force_local)
+
+
+async def _wipe_local_state(settings, strava_client, *, force_local):
     database_path = settings.database_path
     accounts = []
 
@@ -60,6 +67,13 @@ async def wipe_local_state(
                 "Retry later or rerun with --force-local to remove local files only"
             ) from exc
 
+    from commuter.state import SourceCache
+
+    try:
+        SourceCache(settings.cache_directory).remove()
+    except (OSError, ValueError) as exc:
+        raise WipeError("Could not safely remove the owned training cache") from exc
+
     for path in _local_state_paths(database_path):
         try:
             path.unlink()
@@ -68,7 +82,10 @@ async def wipe_local_state(
         except OSError as exc:
             raise WipeError(f"Could not remove local state at {path}") from exc
 
-    return WipeResult(revoked_connections=len(accounts) if not force_local else 0, forced_local_wipe=force_local)
+    return WipeResult(
+        revoked_connections=len(accounts) if not force_local else 0,
+        forced_local_wipe=force_local,
+    )
 
 
 def _local_state_paths(database_path: Path) -> tuple[Path, Path, Path]:
