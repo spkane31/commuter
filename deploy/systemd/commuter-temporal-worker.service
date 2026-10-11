@@ -1,0 +1,24 @@
+[Unit]
+Description=Commuter Strava Temporal workflow worker
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=__COMMUTER_SERVICE_USER__
+Group=__COMMUTER_SERVICE_GROUP__
+WorkingDirectory=__COMMUTER_PROJECT_ROOT__
+EnvironmentFile=__COMMUTER_ENV_FILE__
+Environment=PYTHONUNBUFFERED=1
+ExecStart=__COMMUTER_PROJECT_ROOT__/.venv/bin/commuter temporal-worker
+Restart=on-failure
+RestartSec=10s
+TimeoutStopSec=60s
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=read-only
+ProtectSystem=true
+
+[Install]
+WantedBy=multi-user.target

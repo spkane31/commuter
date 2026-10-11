@@ -179,6 +179,137 @@ over SSH, then visit `http://127.0.0.1:8000` in that computer's browser:
 ssh -L 8000:127.0.0.1:8000 pi@commuter-pi
 ```
 
+## Linux Temporal webhook worker
+
+The Cloudflare Strava receiver submits workflows named
+`processStravaEvent` to the fixed `commuter-strava` task queue. Install this
+separate worker on a durable Linux host (for example, the desktop) to poll that
+queue. It reuses the activity refresh and processor pipeline; Google Sheets
+must be enabled, and the host must have access to the configured Google service
+account file. The worker-only installer does not enable a polling timer. If
+you later add scheduled reconciliation, run it on this same host so its local
+process lock coordinates Sheets writes with webhook work.
+
+1. Pull the repository changes and run the worker-only installer:
+
+   ```sh
+   cd /path/to/commuter
+   make install-temporal-worker
+   ```
+
+   On its first run, `make install-temporal-worker` installs dependencies and
+   state/config directories, creates `/etc/commuter/commuter.env`, and exits.
+   Edit it without printing the secrets:
+
+   ```sh
+   sudoedit /etc/commuter/commuter.env
+   ```
+
+   Fill in the existing Strava/Discord settings and Sheets configuration. Set
+   `COMMUTER_SHEETS_ENABLED=true`, the workbook ID, and
+   `GOOGLE_APPLICATION_CREDENTIALS` to a credentials file readable by the
+   service user. Add the Temporal Cloud values:
+
+   ```text
+   TEMPORAL_ADDRESS=<your-namespace-address>.tmprl.cloud:7233
+   TEMPORAL_NAMESPACE=<your-namespace>.<account-id>
+   TEMPORAL_API_KEY=<Temporal Cloud API key>
+   ```
+
+   Protect the file and, if credentials are stored under a different path,
+   make that file readable only by root and the Commuter service user/group.
+   Never put secrets in Git or paste them into command arguments.
+
+   Before making the database backup, stop the Pi polling service; leave it
+   disabled while the desktop worker owns event processing. The desktop also
+   needs the Commuter SQLite account/configuration database
+   because it holds the Strava refresh token and commute settings. If the Pi is
+   the current owner of that state, create a consistent SQLite backup there,
+   transfer it over SSH, and install it with owner-only permissions on the
+   desktop before starting the worker:
+
+   ```sh
+   # On the Pi
+   sudo systemctl disable --now commuter-sync.timer
+   sudo systemctl stop commuter-sync.service
+   sudo -u pi sqlite3 /var/lib/commuter/commuter.db \
+     ".backup '/var/lib/commuter/commuter-worker.db'"
+   sudo chmod 0600 /var/lib/commuter/commuter-worker.db
+
+   # On the desktop, from the project checkout
+   scp pi@raspberrypi:/var/lib/commuter/commuter-worker.db ./commuter-worker.db
+   sudo install -o "$USER" -g "$(id -gn)" -m 0600 \
+     ./commuter-worker.db /var/lib/commuter/commuter.db
+   rm ./commuter-worker.db
+   # On the Pi, remove its temporary backup after transfer
+   ssh pi@raspberrypi 'rm /var/lib/commuter/commuter-worker.db'
+   ```
+
+   Treat the backup as a secret because it contains Strava tokens. The worker
+   uses this desktop database; the Pi and desktop do not share SQLite over the
+   network.
+
+2. Run the worker target again to install and start the systemd worker. It
+   checks that the Temporal settings are present, renders the unit for this
+   checkout and service account, reloads systemd, enables the worker at boot,
+   and starts it now:
+
+   ```sh
+   make install-temporal-worker
+   ```
+
+   The unit is `commuter-temporal-worker.service`. It restarts on failure and
+   runs `commuter temporal-worker`, which connects to Temporal Cloud with TLS
+   and polls `commuter-strava`.
+
+3. Verify the service is active and inspect recent logs:
+
+   ```sh
+   sudo systemctl status --no-pager commuter-temporal-worker.service
+   sudo journalctl -u commuter-temporal-worker.service -n 100 --no-pager
+   ```
+
+   In Temporal Cloud, start a workflow with type `processStravaEvent`, task
+   queue `commuter-strava`, and a fresh workflow ID. Use a known activity that
+   is already present in the workbook so the activity can be safely replayed.
+   The JSON input is one Strava event object:
+
+   ```json
+   {
+     "aspect_type": "update",
+     "event_time": 1791500000,
+     "object_id": 123456789,
+     "object_type": "activity",
+     "owner_id": 12345678,
+     "subscription_id": 1
+   }
+   ```
+
+   Replace the example IDs with the connected athlete/activity IDs; the
+   subscription ID can be any positive integer for this direct Temporal test.
+   Confirm the workflow completes and the activity remains correctly exported.
+   Do not create the Strava subscription until this queue test succeeds.
+
+Useful service commands:
+
+```sh
+sudo systemctl restart commuter-temporal-worker.service
+sudo systemctl stop commuter-temporal-worker.service
+sudo systemctl disable commuter-temporal-worker.service
+sudo systemctl enable --now commuter-temporal-worker.service
+sudo journalctl -fu commuter-temporal-worker.service
+```
+
+After pulling code changes, run `make install-temporal-worker` again to sync
+the lockfile, render the unit, and restart/enable the service. This worker-only
+target does not install a polling timer or start the local web server. If you
+later restore periodic reconciliation, install it on this host and do not run
+the same poller from the Pi. The target requires non-empty `TEMPORAL_ADDRESS`,
+`TEMPORAL_NAMESPACE`, and
+`TEMPORAL_API_KEY` entries in the environment file; it does not echo their
+values. Until a reconciliation timer is configured, run the existing sync or
+training-reconcile command manually when you need to check for missed events.
+
 ## Configure and poll commuter rides
 
 After connecting exactly one Strava account, configure the commute rule in

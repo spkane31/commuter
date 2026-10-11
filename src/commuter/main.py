@@ -60,6 +60,9 @@ def main() -> None:
     sync_parser = subcommands.add_parser(
         "sync", help="Poll Strava and update newly configured commuter rides"
     )
+    subcommands.add_parser(
+        "temporal-worker", help="Poll Temporal Cloud for Strava webhook workflows"
+    )
     sync_parser.add_argument(
         "--processors",
         help="Select commuter, sheets, or commuter,sheets (startup order is preserved)",
@@ -147,6 +150,15 @@ def main() -> None:
 
     if arguments.command == "configure-commute":
         _configure_commute(arguments, parser)
+        return
+
+    if arguments.command == "temporal-worker":
+        from commuter.temporal_worker import run_temporal_worker
+
+        try:
+            asyncio.run(run_temporal_worker())
+        except (OSError, ValueError) as exc:
+            parser.error(str(exc))
         return
 
     if arguments.command == "sync":
