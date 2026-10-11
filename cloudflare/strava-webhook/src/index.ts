@@ -70,7 +70,7 @@ export default {
         return new Response("EVENT_RECEIVED", { status: 200 });
       }
       // Do not acknowledge: Strava will retry transient failures.
-      console.error("Unable to enqueue Strava event", safeErrorName(error));
+      console.error("Unable to enqueue Strava event", safeErrorDetails(error));
       return new Response("Unable to enqueue event", { status: 503 });
     }
   },
@@ -149,8 +149,11 @@ function isAlreadyStarted(error: unknown): boolean {
   );
 }
 
-function safeErrorName(error: unknown): string {
-  return error instanceof Error ? error.name : "UnknownError";
+function safeErrorDetails(error: unknown): { name: string; message: string } {
+  if (error instanceof Error) {
+    return { name: error.name, message: error.message.slice(0, 500) };
+  }
+  return { name: "UnknownError", message: String(error).slice(0, 500) };
 }
 
 function isPositiveInteger(value: unknown): value is number {
