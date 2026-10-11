@@ -1,0 +1,13 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "commuter-strava-webhook",
+  "main": "cloudflare/strava-webhook/src/index.ts",
+  "compatibility_date": "2026-10-11",
+  "workers_dev": true,
+  "secrets": {
+    "required": [
+      "STRAVA_VERIFY_TOKEN",
+      "TEMPORAL_API_KEY"
+    ]
+  }
+}

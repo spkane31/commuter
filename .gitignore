@@ -12,6 +12,8 @@ dist/
 venv/
 env/
 ENV/
+node_modules/
+.dev.vars
 
 # Test, coverage, lint, and type-checker caches
 .pytest_cache/
