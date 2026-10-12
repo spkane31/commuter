@@ -32,6 +32,7 @@ def test_make_installs_and_enables_temporal_worker_service():
     assert "Restart=on-failure" in contents
 
 
+
 def test_env_example_documents_temporal_worker_settings():
     example = (ROOT / "deploy/systemd/commuter.env.example").read_text()
     assert "TEMPORAL_ADDRESS=" in example

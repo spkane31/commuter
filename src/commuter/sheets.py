@@ -496,15 +496,28 @@ class SheetsAdapter:
         self._retry_not_before = 0.0
 
     async def _run(self, function, *args):
+        operation = getattr(function, "__name__", type(function).__name__)
         try:
             return await asyncio.get_running_loop().run_in_executor(
                 self._executor, function, *args
             )
-        except (ValueError, SheetsError):
+        except ValueError:
             raise
-        except Exception as exc:
+        except SheetsError as exc:
+            logger.error("Google Sheets operation %s failed: %s", operation, exc)
             raise SheetsError(
-                "Google Sheets operation failed; check access/connectivity and retry"
+                f"Google Sheets operation {operation} failed: {exc}"
+            ) from exc
+        except Exception as exc:
+            logger.exception(
+                "Google Sheets operation %s failed (%s): %s",
+                operation,
+                type(exc).__name__,
+                exc,
+            )
+            raise SheetsError(
+                f"Google Sheets operation {operation} failed "
+                f"({type(exc).__name__}): {exc}"
             ) from exc
 
     def _sdk(self):

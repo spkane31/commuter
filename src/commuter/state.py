@@ -23,7 +23,7 @@ def content_version(value: object) -> str:
 def process_lock(path: Path):
     """Reject overlapping operations; locks are released automatically on a crash."""
 
-    import fcntl  # This application deploys to POSIX hosts (Linux Pi/macOS).
+    import fcntl  # The runtime targets POSIX hosts.
 
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     descriptor = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)

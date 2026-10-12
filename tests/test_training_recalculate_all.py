@@ -91,3 +91,113 @@ def test_recalculate_cli_continues_after_time_limited_batch(
     assert all(call["mode"] == "recalculate" for call in calls)
     output = capsys.readouterr().out
     assert "pending=True" in output and "pending=False" in output
+
+
+def test_30_day_sync_cli_replays_both_processors_until_complete(
+    monkeypatch, tmp_path, capsys
+):
+    import commuter.main as cli
+    import commuter.pipeline as pipeline
+    import commuter.sheets as sheets
+
+    settings = Settings(
+        "client", "secret", tmp_path / "commuter.db", "http://localhost",
+        spreadsheet_id="sheet",
+    )
+    connected_store(tmp_path).close()
+    calls = []
+
+    async def synchronize(**kwargs):
+        calls.append(kwargs)
+        return pipeline.TrainingSyncResult(
+            exported=[len(calls)], pending=len(calls) == 1
+        )
+
+    class Adapter(Sink):
+        def __init__(self, *args, **kwargs):
+            super().__init__()
+
+        async def close(self):
+            pass
+
+    class Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+    monkeypatch.setattr(pipeline, "synchronize_training", synchronize)
+    monkeypatch.setattr(sheets, "SheetsAdapter", Adapter)
+    monkeypatch.setattr(cli, "StravaClient", lambda settings: Client())
+    cli._training_command(
+        argparse.Namespace(
+            command="sync", max_activities=None, dry_run=False, verbose=False,
+            backfill_days=30, recheck_non_matches=False,
+        ),
+        argparse.ArgumentParser(),
+        settings=settings,
+        selected=("commuter", "sheets"),
+    )
+
+    assert len(calls) == 2
+    assert all(call["selected"] == ("commuter", "sheets") for call in calls)
+    assert all(call["max_activities"] is None for call in calls)
+    assert all(call["recheck_non_matches"] for call in calls)
+    assert all(call["commute_after"] is not None for call in calls)
+    output = capsys.readouterr().out
+    assert "exported=2, pending=False" in output
+
+
+def test_30_day_sheets_only_sync_continues_until_complete(
+    monkeypatch, tmp_path, capsys
+):
+    import commuter.main as cli
+    import commuter.pipeline as pipeline
+    import commuter.sheets as sheets
+
+    settings = Settings(
+        "client", "secret", tmp_path / "commuter.db", "http://localhost",
+        spreadsheet_id="sheet",
+    )
+    connected_store(tmp_path).close()
+    calls = []
+
+    async def synchronize(**kwargs):
+        calls.append(kwargs)
+        return pipeline.TrainingSyncResult(
+            exported=[len(calls)], pending=len(calls) == 1
+        )
+
+    class Adapter(Sink):
+        def __init__(self, *args, **kwargs):
+            super().__init__()
+
+        async def close(self):
+            pass
+
+    class Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+    monkeypatch.setattr(pipeline, "synchronize_training", synchronize)
+    monkeypatch.setattr(sheets, "SheetsAdapter", Adapter)
+    monkeypatch.setattr(cli, "StravaClient", lambda settings: Client())
+    cli._training_command(
+        argparse.Namespace(
+            command="sync", max_activities=None, dry_run=False, verbose=False,
+            backfill_days=30, recheck_non_matches=False,
+        ),
+        argparse.ArgumentParser(),
+        settings=settings,
+        selected=("sheets",),
+    )
+
+    assert len(calls) == 2
+    assert all(call["selected"] == ("sheets",) for call in calls)
+    assert all(call["max_activities"] is None for call in calls)
+    output = capsys.readouterr().out
+    assert "exported=2, pending=False" in output

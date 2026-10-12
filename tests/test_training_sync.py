@@ -250,6 +250,101 @@ class Source:
         return {"zones": []}
 
 
+@pytest.mark.asyncio
+async def test_explicit_sync_window_runs_all_activities_through_both_processors(
+    tmp_path: Path, monkeypatch,
+):
+    import commuter.discord
+
+    from commuter.models import CommuteConfiguration, Coordinate, Location
+    from commuter.pipeline import synchronize_training
+    from commuter.state import SourceCache
+
+    class Notifier:
+        def __init__(self, settings):
+            pass
+
+    monkeypatch.setattr(commuter.discord, "DiscordNotifier", Notifier)
+
+    store, source, sink = connected_store(tmp_path), Source(), Sink()
+    store.save_commute_configuration(
+        CommuteConfiguration(
+            123,
+            (Location("home", Coordinate(39, -105)), Location("work", Coordinate(40, -105))),
+            150,
+            25,
+            400,
+            "car",
+            "USD",
+        )
+    )
+    settings = Settings(
+        "client", "secret", tmp_path / "commuter.db", "http://localhost",
+        reporting_timezone="UTC", training_max_activities=1,
+    )
+    after = int(datetime(2026, 9, 3, tzinfo=timezone.utc).timestamp())
+    try:
+        result = await synchronize_training(
+            settings=settings,
+            store=store,
+            token_manager=Tokens(),
+            strava_client=source,
+            sheets=sink,
+            cache=SourceCache(tmp_path / "cache"),
+            mode="sync",
+            selected=("commuter", "sheets"),
+            now=datetime(2026, 10, 3, tzinfo=timezone.utc),
+            commute_after=after,
+        )
+
+        assert result.exported == [1, 2]
+        assert not result.pending
+        assert set(sink.rows) == {"1", "2"}
+        assert source.list_calls[0][0] == after - 1
+        progress = store.get_progress(123, "sheet", "sync")
+        assert progress["after"] == after
+        assert progress["training_after"] == after
+    finally:
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_explicit_sheets_only_sync_ignores_default_activity_cap(
+    tmp_path: Path,
+):
+    from commuter.pipeline import synchronize_training
+    from commuter.state import SourceCache
+
+    store, source, sink = connected_store(tmp_path), Source(), Sink()
+    settings = Settings(
+        "client", "secret", tmp_path / "commuter.db", "http://localhost",
+        reporting_timezone="UTC", training_max_activities=1,
+    )
+    after = int(datetime(2026, 9, 3, tzinfo=timezone.utc).timestamp())
+    try:
+        result = await synchronize_training(
+            settings=settings,
+            store=store,
+            token_manager=Tokens(),
+            strava_client=source,
+            sheets=sink,
+            cache=SourceCache(tmp_path / "cache"),
+            mode="sync",
+            selected=("sheets",),
+            now=datetime(2026, 10, 3, tzinfo=timezone.utc),
+            commute_after=after,
+        )
+
+        assert result.exported == [1, 2]
+        assert not result.pending
+        assert set(sink.rows) == {"1", "2"}
+        progress = store.get_progress(123, "sheet", "sync")
+        assert progress["after"] == after
+        assert progress["training_after"] == after
+    finally:
+        store.close()
+
+
 class Tokens:
     async def get_access_token(self, athlete):
         return "token"

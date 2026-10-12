@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from email.utils import formatdate
 
 import httplib2
@@ -110,3 +111,23 @@ def test_sheets_retries_are_bounded_and_cooldown_survives_exhaustion(retry_clock
     following = ThrottledRequest({}, failures=0)
     assert adapter._execute(following) == {"updatedRows": 1}
     assert retry_clock.sleeps[-1] == 64.0
+
+
+@pytest.mark.asyncio
+async def test_adapter_logs_operation_and_underlying_error(caplog):
+    adapter = SheetsAdapter("workbook")
+
+    def read_activities():
+        raise RuntimeError("service account file is unreadable")
+
+    try:
+        with caplog.at_level(logging.ERROR, logger="commuter.sheets"):
+            with pytest.raises(
+                SheetsError,
+                match="read_activities.*RuntimeError.*service account file is unreadable",
+            ):
+                await adapter._run(read_activities)
+    finally:
+        await adapter.close()
+
+    assert "Google Sheets operation read_activities failed" in caplog.text

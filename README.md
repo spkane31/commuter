@@ -1,493 +1,151 @@
 # Commuter
 
-Commuter is a personal, server-side service that recognizes bicycle trips
-between user-defined places, marks qualifying Strava activities as commutes,
-and appends an estimate of avoided gasoline and fuel cost to the activity
-description.
+Commuter connects a personal Strava account, marks configured bike trips as
+commutes, estimates fuel and CO₂ savings, and exports training measurements to
+Google Sheets. Strava events arrive through a Cloudflare Worker and Queue; a
+Linux Temporal worker pulls queued events and runs the shared Python pipeline.
+Local commands provide setup, backfill, and recovery. There is no scheduled
+polling service.
 
-The first release is deliberately personal and narrow: one athlete and manual
-vehicle and fuel inputs. It uses each matched activity's recorded Strava
-distance as the avoided driving distance; it does not need a browser
-extension, Google Maps, or an automatic fuel-price provider.
-
-## Product decisions
-
-- **Python is the implementation language.** Python's HTTP, web, data
-  validation, and system-integration ecosystems fit this local service better
-  than growing the initial Go bootstrap.
-- **Server-side only.** The application owns OAuth, local settings, scheduled
-  polling, and activity updates. It must never scrape or automate Strava's
-  website.
-- **Activity descriptions** Strava supports updating an
-  activity's `commute`, `hide_from_home`, and `description` fields. [Strava's
-  activity reference](https://developers.strava.com/docs/reference/)
-- **Manual inputs first.** The user supplies combined MPG and current gas
-  price for each commute rule. Commuter uses the matched activity's recorded
-  Strava distance for its savings estimate.
-- **Feed muting is automatic.** Every Commuter update sets
-  `hide_from_home: true`, removing it from the home feed while retaining it on
-  the athlete's profile.
-- **Persistent total for this private deployment.** The owner has chosen to
-  retain the per-activity savings record and cumulative total in an owner-only
-  local database.
-
-## First-release experience
-
-1. Sign in with Strava and grant `activity:read_all,activity:write`.
-2. Configure a commute rule with at least two named locations, an endpoint
-   radius, vehicle fuel economy, and gas price.
-3. Upload a qualifying `Ride` after the rule is created.
-4. The Pi polls Strava every 15 minutes, marks the ride as a commute, and
-   appends a managed description block:
-
-   ```text
-   --- Commuter ---
-   Fuel avoided: 0.20 gal
-   CO₂ avoided: 1.78 kg
-   Estimated fuel savings: $0.87
-   Cumulative fuel savings: $12.34
-   Cumulative CO₂ avoided: 27.45 kg
-   --- /Commuter ---
-   ```
-
-The service replaces only the block between these delimiters and preserves the
-rest of the athlete's description. It records the durable activity outcome only
-after the Strava update and Discord notification succeed, so either remote call
-is retried if it fails.
-
-## Matching and calculation rules
-
-An activity matches when its selected sport type is allowed and both endpoint
-tests are true:
+## Runtime
 
 ```text
-distance(activity.start, origin.location) <= origin.radius
-distance(activity.end, destination.location) <= destination.radius
+Strava webhook → Cloudflare Worker → Cloudflare Queue
+                                         ↓ outbound pull
+Linux Temporal worker → ordered activity processors → Strava + Google Sheets
 ```
 
-Any two distinct configured locations are direction-independent; a ride
-matching Location A ↔ Location B also matches Location B ↔ Location A. A ride
-that starts and ends at the same location never matches. Missing or
-privacy-obscured endpoint coordinates, or a missing activity distance, are
-safe non-matches, never an automatic commute.
+The Cloudflare Worker verifies Strava's callback challenge and enqueues event
+JSON. It does not run activity processing. The Linux service polls the Queue
+outbound over HTTPS, starts `processStravaEvent` on Temporal task queue
+`commuter-strava`, and acknowledges messages after Temporal accepts them. The
+worker needs the local SQLite database containing the connected Strava account
+and commute configuration. Queue delivery is at least once; workflow IDs and
+idempotent activity/Sheets writes make replay safe.
 
-For a matched activity:
+The processor list is registered at startup. Each processor receives the
+processing context first and the current activity second, then returns the
+updated activity. The commuter processor handles commute classification and
+Strava updates; the Sheets processor exports training data. Both run in the
+same order for local sync and Temporal workflows.
 
-```text
-ride_miles      = activity.distance_meters / 1609.344
-gallons_avoided = ride_miles / combined_mpg
-fuel_savings    = gallons_avoided * gas_price_per_gallon
-co2_avoided     = gallons_avoided * 8,887 grams CO₂/gallon
-```
+## Local setup
 
-The activity distance is a practical estimate, not a driving-route calculation.
-CO₂ is estimated as gasoline tailpipe emissions using EPA's 8,887 grams per
-gallon factor; it excludes fuel-production and bicycle lifecycle emissions.
-[EPA vehicle emissions reference](https://www.epa.gov/greenvehicles/greenhouse-gas-emissions-typical-passenger-vehicle)
-The numbers are not a claim about actual gasoline, parking, or vehicle wear
-savings.
-
-## Technical shape
-
-| Concern | First-release choice |
-| --- | --- |
-| Web/API service | Python, FastAPI, and HTTPX |
-| Scheduled work | `systemd` one-shot service and persistent 15-minute timer |
-| Credential and configuration storage | Owner-only local SQLite |
-| Authentication | Strava OAuth authorization-code flow and local refresh tokens |
-| Activity trigger | Poll `/athlete/activities` after the configured rule time |
-| Secrets | Owner-only local environment file and database; no credentials in source or logs |
-| Tests | Pytest and mocked Strava HTTP responses |
-
-New Strava applications begin in single-player mode, which fits the personal
-launch. OAuth access tokens are short-lived and refresh tokens must remain
-server-side. [Strava getting started](https://developers.strava.com/docs/getting-started/)
-[OAuth documentation](https://developers.strava.com/docs/authentication/)
-
-The sync command obtains a valid access token, lists recent activities, fetches
-the unprocessed candidates, and updates matching rides. It has no public
-webhook endpoint or Temporal dependency. [Strava activity reference](https://developers.strava.com/docs/reference/)
-
-Every successful live activity update also sends its Strava link, estimated and
-cumulative fuel savings, and estimated and cumulative CO₂ avoided to the
-configured Discord channel. It uses the Discord bot API; the bot must be in the
-configured guild and have permission to view and send messages in the
-configured channel. [Discord message API](https://discord.com/developers/docs/resources/message#create-message)
-
-## Local OAuth setup
-
-The first implemented slice is local Strava connection management. It starts a
-browser OAuth flow, checks state and granted scopes, stores the returned access
-and refresh tokens in an owner-only SQLite database, refreshes expired access
-tokens, and revokes/deletes the local connection on disconnect.
-
-1. In the Strava API settings, configure the authorization callback domain as
-   `127.0.0.1` for local development. The application callback is
-   `http://127.0.0.1:8000/auth/strava/callback`.
-2. Keep `STRAVA_CLIENT_ID`, `STRAVA_CLIENT_SECRET`, `DISCORD_BOT_TOKEN`,
-   `DISCORD_GUILD_ID`, and `DISCORD_CHANNEL_ID` in `.env`. The existing
-   `STRAVA_ACCESS_TOKEN` and `STRAVA_REFRESH_TOKEN` are not imported by the web
-   service; visiting the OAuth flow obtains a new athlete token set and writes
-   it to local storage. Discord settings are required when running `sync`.
-3. Install and run the service:
-
-   ```sh
-   uv sync --group dev
-   uv run commuter
-   ```
-
-4. Visit `http://127.0.0.1:8000`, select **Connect with Strava**, and approve
-   `activity:read_all` plus `activity:write`.
-
-The service creates `commuter.db` in the project directory with mode `0600`.
-The database holds access/refresh tokens and owner-entered settings in
-plaintext, which is appropriate only for this personal, local-network
-deployment. It is ignored by Git. The local privacy, terms, support, and
-deletion pages are available at `/privacy`, `/terms`, `/support`, and
-`/data-deletion`.
-
-## Raspberry Pi web service
-
-`make install` generates systemd units for the path of the current checkout
-and runs them as the user that invokes the command. It stores mutable state in
-`/var/lib/commuter` and binds the optional OAuth/local-administration web
-service to `127.0.0.1`, so it does not expose a port to the LAN or internet.
-
-On Raspberry Pi OS or another Debian-based system, install `uv`, then run the
-target from the checkout's actual location. The target installs Python 3.13:
+Use Python 3.13 and `uv`. Put `STRAVA_CLIENT_ID` and
+`STRAVA_CLIENT_SECRET` in a private `.env` file, then install and start the
+local application:
 
 ```sh
-curl -LsSf https://astral.sh/uv/install.sh | sh
-cd /path/to/commuter
-make install
+uv sync --group dev
+chmod 600 .env
+uv run commuter
 ```
 
-The first invocation creates `/etc/commuter/commuter.env` and exits. Populate
-that file, then run `make install` again. Enable the web service only when you
-need to use it:
-
-```sh
-sudo systemctl enable commuter-web.service
-sudo systemctl start commuter-web.service
-sudo systemctl status commuter-web.service
-```
-
-For OAuth or local administration from another computer, tunnel the service
-over SSH, then visit `http://127.0.0.1:8000` in that computer's browser:
-
-```sh
-ssh -L 8000:127.0.0.1:8000 pi@commuter-pi
-```
-
-## Cloudflare Queue and Linux Temporal worker
-
-The Cloudflare Worker verifies Strava subscription challenges and publishes
-validated event JSON to the `commuter` Cloudflare Queue. The Linux desktop pulls
-messages outbound over HTTPS, starts `processStravaEvent` on the fixed
-`commuter-strava` Temporal task queue, and acknowledges a message only after
-Temporal accepts the workflow. No inbound port, tunnel, or public Linux server
-is needed. The Linux host needs its local Commuter database, Strava token,
-Google Sheets credentials, and Temporal credentials.
-
-### Configure Cloudflare
-
-1. In Cloudflare Queues, create the queue named `commuter` if it does not
-   already exist. The repository's `wrangler.jsonc` producer binding expects
-   that exact name. The producer binding does not enable the HTTP pull
-   consumer. From this repository, enable it once with
-   `npx wrangler queues consumer http add commuter` (or enable HTTP pull in the
-   dashboard). Use a dead-letter queue and a retry count appropriate for
-   recovering from a prolonged desktop or Temporal outage. Do not configure a
-   push consumer to a local endpoint. Cloudflare documents the [HTTP pull
-   consumer API](https://developers.cloudflare.com/queues/configuration/pull-consumers/).
-2. Create a restricted pull-consumer token in the Cloudflare dashboard:
-   **My Profile → API Tokens → Create Token → Create Custom Token**. Name it
-   `commuter-linux-queue-pull`; under **Permissions**, choose **Account → Queues
-   → Edit** (the required `queues_read` and `queues_write` permissions); under
-   **Account Resources**, select only the account that owns this queue. Create
-   the token and copy it once. Store it only in `/etc/commuter/commuter.env` on
-   Linux, never in Wrangler or Git. Find the Account ID under the account's
-   **Overview** and the Queue ID under **Workers & Pages → Queues → commuter**.
-3. Configure `STRAVA_VERIFY_TOKEN` as a Worker secret. The Worker no longer
-   needs Temporal address, namespace, or API key, and it does not validate the
-   athlete or subscription IDs. Remove unused Temporal secrets from Worker
-   settings. The receiver returns success only after the event has been
-   published; a publish failure returns 503 so Strava can retry.
-4. Let the Git-connected Cloudflare build deploy the `wrangler.jsonc` producer
-   binding after the queue exists. Verify `GET /strava` challenge succeeds
-   before creating the Strava subscription.
-
-### Configure the Linux worker
-
-1. Pull the repository changes and run the installer:
-
-   ```sh
-   cd /path/to/commuter
-   make install-temporal-worker
-   ```
-
-   On its first run it creates `/etc/commuter/commuter.env` and exits. Edit the
-   file with `sudoedit /etc/commuter/commuter.env`; do not print or paste
-   secrets. Configure the existing Strava and Discord settings, enable Sheets,
-   set the workbook ID and Google credentials path, and configure:
-
-   ```text
-   TEMPORAL_ADDRESS=<namespace-address>.tmprl.cloud:7233
-   TEMPORAL_NAMESPACE=<namespace>.<account-id>
-   TEMPORAL_API_KEY=<Temporal Cloud API key>
-   CLOUDFLARE_ACCOUNT_ID=<Cloudflare account ID>
-   CLOUDFLARE_QUEUE_ID=<opaque queue ID for queue named commuter>
-   CLOUDFLARE_API_TOKEN=<account-scoped Queues read/write token>
-   ```
-
-   Optional queue poll, retry, and visibility timeout values are documented in
-   `deploy/systemd/commuter.env.example`. Protect this environment file and
-   Google credential file from other local users. The installer checks that
-   required values exist without displaying them.
-
-2. The desktop needs the Commuter SQLite database because it contains the
-   Strava refresh token and local configuration. Stop the Pi sync timer before
-   moving event ownership. Make a consistent SQLite backup on the Pi, transfer
-   it over SSH, install it on the desktop with mode 0600, then remove the
-   temporary copy. Do not share a live SQLite database over the network. For
-   example:
-
-   ```sh
-   # On the Pi
-   sudo systemctl disable --now commuter-sync.timer
-   sudo systemctl stop commuter-sync.service
-   sudo -u pi sqlite3 /var/lib/commuter/commuter.db \
-     ".backup '/var/lib/commuter/commuter-worker.db'"
-   sudo chmod 0600 /var/lib/commuter/commuter-worker.db
-
-   # On the desktop, from the project checkout
-   scp pi@raspberrypi:/var/lib/commuter/commuter-worker.db ./commuter-worker.db
-   sudo install -o "$USER" -g "$(id -gn)" -m 0600 \
-     ./commuter-worker.db /var/lib/commuter/commuter.db
-   rm ./commuter-worker.db
-   ssh pi@raspberrypi 'rm /var/lib/commuter/commuter-worker.db'
-   ```
-
-3. Run `make install-temporal-worker` again. It syncs dependencies, renders and
-   verifies `commuter-temporal-worker.service`, enables it at boot, and starts
-   it. The service runs both the Cloudflare Queue puller and the Temporal
-   activity worker; both connections are outbound. Check it with:
-
-   ```sh
-   sudo systemctl status --no-pager commuter-temporal-worker.service
-   sudo journalctl -u commuter-temporal-worker.service -n 100 --no-pager
-   ```
-
-### Verify end to end
-
-Check the systemd service and journal first:
-
-```sh
-sudo systemctl is-enabled commuter-temporal-worker.service
-sudo systemctl is-active commuter-temporal-worker.service
-sudo systemctl status --no-pager commuter-temporal-worker.service
-sudo journalctl -u commuter-temporal-worker.service -n 100 --no-pager
-```
-
-Then start a `processStravaEvent` workflow manually in Temporal with a known
-activity, its real connected athlete ID, and task queue `commuter-strava`. Once
-that succeeds, test the Cloudflare puller before relying on the Strava
-subscription: in **Workers & Pages → Queues → commuter → Messages → Send**,
-choose **Text** and send a valid `update` event for that same already-imported
-activity. Use the current Unix timestamp and real numeric activity/athlete IDs.
-Confirm the queue backlog drains, Temporal shows a completed workflow, the
-service stays active, and the existing activity row is updated rather than
-duplicated. Then stop the service, enqueue one more safe test message, confirm
-it remains pending, start the service, and verify it is processed. Queue
-delivery is at-least-once: stable workflow IDs and idempotent sheet upserts
-handle redelivery if the process stops between workflow start and message
-acknowledgement. The Temporal activity validates event ownership against the
-local database.
-
-Useful service commands:
-
-```sh
-sudo systemctl restart commuter-temporal-worker.service
-sudo systemctl stop commuter-temporal-worker.service
-sudo systemctl disable commuter-temporal-worker.service
-sudo systemctl enable --now commuter-temporal-worker.service
-sudo journalctl -fu commuter-temporal-worker.service
-```
-
-After code updates, run `make install-temporal-worker` again. It does not
-install a polling timer or start the local web server. Do not run the same
-activity processor on the Pi while the desktop owns the database and event
-consumer. Periodic reconciliation remains a separate manual sync/reconcile
-operation until a schedule is configured on the desktop.
-
-## Configure and poll commuter rides
-
-After connecting exactly one Strava account, configure the commute rule in
-the local database. Coordinates are command-line input and are not
-committed to this repository.
+Configure the Strava OAuth callback as `127.0.0.1` and visit
+`http://127.0.0.1:8000`. Connect the account with `activity:read_all` and
+`activity:write`. The local SQLite database stores the refresh token and
+commute settings; protect it as a secret. To configure commute endpoints:
 
 ```sh
 uv run commuter configure-commute \
   --location home,LATITUDE,LONGITUDE \
   --location work,LATITUDE,LONGITUDE \
-  --location gym,LATITUDE,LONGITUDE \
   --radius-m 150 \
   --combined-mpg 25 \
   --gas-price 4.34 \
   --vehicle "2016 Subaru Forester"
 ```
 
-Repeat `--location NAME,LATITUDE,LONGITUDE` for each place you want the rule to
-cover; at least two are required. The rule applies to `Ride` activities that
-begin within the configured radius of one location and finish within the
-radius of a *different* configured location, in either direction—a ride that
-starts and ends at the same location does not match. For each matching ride,
-Commuter converts the ride's Strava distance from
-meters to miles, then uses it with the configured MPG and gas price. It marks
-the activity as a Strava commute and appends a managed description block with
-that ride's savings and the persistent cumulative total. Existing non-Commuter
-description text is preserved. Every matching activity is kept off the home
-feed while remaining visible on the athlete's profile.
+The local server is only needed for OAuth and administration. The event worker
+is a separate process.
 
-By default a poll only considers rides after the rule was saved. To safely
-inspect older rides from the last week, make a read-only dry run:
+## Cloudflare receiver
 
-```sh
-uv run commuter sync --backfill-days 7 --dry-run
-```
+The repository's Wrangler config binds a producer named `commuter` to a
+Cloudflare Queue with that name. Deploy the Worker through the connected Git
+build or with `npx wrangler deploy`. Set `STRAVA_VERIFY_TOKEN` as an encrypted
+Worker secret, then register the callback URL
+`https://<worker-host>/strava` with Strava. The receiver requires no Temporal,
+Strava API, or Google credentials. It returns success after enqueueing the
+notification; failed publishes return an error so Strava can retry.
 
-It prints the matching Strava activity IDs but does not update Strava, change
-the cumulative total, or record any processing state locally. If those are the
-rides you expect, apply that same historical window once:
+## Linux Temporal worker
+
+Install `uv`, clone the repository on the Linux host, and run:
 
 ```sh
-uv run commuter sync --backfill-days 7
+make install-temporal-worker
 ```
 
-That live command marks matching historical rides as commutes, hides them from
-the home feed, and adds their fuel savings and CO₂ avoided to persistent
-cumulative totals. Future scheduled polls use the default window, so they do
-not repeatedly backfill old rides.
+The first run creates `/etc/commuter/commuter.env` and exits. Edit it with
+`sudoedit /etc/commuter/commuter.env`, then run the make command again. The
+installer configures and starts `commuter-temporal-worker.service`.
 
-To explain why previously evaluated rides did or did not match, use the
-read-only diagnostic recheck. Each non-match logs its activity ID, local date,
-Strava activity type, distance in miles, and the matching reason:
+Required settings are listed in
+[`deploy/systemd/commuter.env.example`](deploy/systemd/commuter.env.example):
+Strava client ID/secret, Discord bot token/guild/channel, Temporal address,
+namespace and API key, Cloudflare account ID/queue ID/API token, plus Sheets
+enabled, workbook ID and Google service-account credential path. Set
+`COMMUTER_DATABASE_PATH` and `COMMUTER_TRAINING_CACHE_DIR` to persistent,
+private paths. The database must already contain the connected Strava account
+and commute rule. Keep both the environment file and Google credential file
+readable only by the service owner.
+
+Check service health and logs:
 
 ```sh
-uv run commuter sync --backfill-days 2 --recheck-non-matches --dry-run --verbose
+sudo systemctl status --no-pager commuter-temporal-worker.service
+sudo journalctl -u commuter-temporal-worker.service -n 100 --no-pager
+sudo journalctl -fu commuter-temporal-worker.service
 ```
 
-After reviewing that output, remove `--dry-run` to apply newly matched rides.
-Rides already marked as a Strava commute are treated as Commuter matches even
-when their saved endpoints do not fall within any configured location's radius.
+After updates, pull the repository and rerun `make install-temporal-worker`.
+To provision the Cloudflare Queue API token, create a custom Cloudflare API
+token with account-scoped **Queues: Edit** permission. Store it only in the
+Linux environment file. The Queue ID is available under **Workers & Pages →
+Queues** in the Cloudflare dashboard.
 
-If a poll reports HTTP 401 or 403, start the local web application with
-`uv run commuter`, visit http://127.0.0.1:8000, and use **Connect with Strava**
-to replace the local authorization. Approve `activity:read_all` and
-`activity:write`. Reconnecting the same athlete retains the saved commute rule
-and cumulative total.
+For end-to-end validation, send a valid update event for a real, already
+imported activity using the Cloudflare Queue dashboard. Confirm the queue
+backlog drains, the workflow completes on `commuter-strava`, the service stays
+active, and the existing Sheets row is updated without duplication. Then stop
+the service, enqueue a second test message, verify it remains queued, restart
+the service, and verify recovery.
 
-On HTTP 429, Commuter treats the request as retryable. It honors a short
-`Retry-After` delay once and logs the backoff with `--verbose`. A delay longer
-than 60 seconds is deferred to the next 15-minute poll so the Pi service stays
-within its two-minute startup limit; the CLI reports the calculated retry delay.
+## Manual sync and recovery
 
-After verifying one live update, enable the persistent 15-minute timer on the
-Pi:
+Local `sync` uses the same registered processor pipeline. Use it for an
+explicit historical import, reconciliation, or recovery. The machine must have
+the local Commuter database and configured Google credentials.
 
 ```sh
-sudo systemctl enable commuter-sync.timer
-sudo systemctl start commuter-sync.timer
-sudo systemctl list-timers commuter-sync.timer
-sudo journalctl -u commuter-sync.service -f
+uv run commuter sheets-setup
+uv run commuter sync --processors commuter,sheets --backfill-days 30
 ```
 
-The timer waits two minutes after boot and then runs every 15 minutes. A timer
-run that is delayed by an outage is retried at the next interval; systemd will
-not run overlapping `commuter sync` processes.
-
-### Updating an installed Pi
-
-Keep the repository checkout wherever is convenient (for example,
-`~/git/github.com/spkane31/commuter`), then SSH to the Pi and run the following
-from that checkout as the normal SSH user—not with `sudo`:
+With `--max-activities` omitted, an explicit backfill continues through
+batches until the range completes, errors occur, or the time budget requires a
+later rerun. Progress is persisted, so rerunning the same command resumes the
+captured range. Add `--dry-run --verbose` to inspect commute matches without
+applying changes or exporting. To refresh older edited data or recalculate
+cached data after settings changes:
 
 ```sh
-make install
+uv run commuter training-refresh --activity-id ACTIVITY_ID
+uv run commuter training-recalculate
+uv run commuter training-reconcile
 ```
 
-On its first invocation, the target creates the state/configuration directories
-and an `/etc/commuter/commuter.env` template, then stops. Populate the Strava
-and Discord settings, copy an existing plaintext database into
-`/var/lib/commuter` as shown below, then run `make install` again.
+`training-recalculate` uses cached source data and avoids Strava requests.
+`training-reconcile` refreshes the full activity-ID list. A reporting removal
+can be recorded with `training-remove --activity-id ACTIVITY_ID`; it does not
+delete the Strava activity. `commuter wipe` revokes Strava access and removes
+local state; `--force-local` removes local files when revocation is unavailable.
 
-On later updates, run `git pull` in that checkout, then run `make install`
-again. The target synchronizes dependencies, regenerates the units with that
-checkout's current absolute path, reloads systemd, and restarts the active web
-service/timer. It deliberately does not replace the database or populated
-`/etc/commuter/commuter.env`, preserving OAuth credentials, commute totals, and
-Discord configuration. The default `uv` path is `~/.local/bin/uv`; override it
-when necessary, for example `make install UV_BIN=/usr/local/bin/uv`.
+## Google Sheets
 
-If the account connection and rule are configured on another computer before
-moving to the Pi, copy the database:
-
-```sh
-scp -p commuter.db pi@raspberrypi.local:/tmp/
-ssh pi@raspberrypi.local '
-  sudo install -o pi -g pi -m 0600 /tmp/commuter.db /var/lib/commuter/commuter.db
-'
-```
-
-## Wipe local state
-
-To stop using Commuter, revoke its Strava authorization and remove all local
-Commuter data—including credentials, settings, and activity-processing state—run:
-
-```sh
-uv run commuter wipe
-```
-
-The command keeps all local files if Strava cannot be reached or revocation
-fails. Retry when online. If the Pi is being retired or local deletion is more
-important than revocation, use:
-
-```sh
-uv run commuter wipe --force-local
-```
-
-`--force-local` removes local data without revoking the authorization held by
-Strava. Revoke the application separately from Strava's connected-app settings
-when possible. Neither command removes `.env`, which contains the application
-client secret rather than connected-account data; protect it with owner-only
-permissions (`chmod 600 .env`).
-
-## Local data
-
-The owner-only plaintext database stores the OAuth connection, configured
-location coordinates, vehicle inputs, durable cumulative savings and CO₂
-totals, and activity outcomes. It does not retain raw Strava activity payloads. `commuter
-wipe` removes the database when the Pi or service is retired.
-
-## Deferred work
-
-- Automatic gas-price and vehicle-economy sources
-- Google Routes driving-distance calculation and map picker
-- Backfills, multi-athlete onboarding, a browser extension, and public hosting
-
-
-## Training export to Google Sheets
-
-Two processors run in declaration order: `CommuteProcessor`, then
-`TrainingSheetsProcessor`. Each receives `context` first and the updated activity
-second. Training-only commands do not edit Strava, notify Discord, or change
-commute savings. Existing home/work configurations remain readable.
-
-Install the locked dependencies with `uv sync --frozen --group dev`. Enable the
-Sheets API, share the target workbook with the service-account email as an
-editor, and keep its JSON credentials outside version control. The adapter uses
-the official Google SDK with the `https://www.googleapis.com/auth/spreadsheets`
-scope; scheduled runs require no browser. Example private configuration:
+Enable the Sheets API, share the workbook with the service-account email as an
+editor, and set:
 
 ```dotenv
 COMMUTER_SHEETS_ENABLED=true
@@ -496,205 +154,57 @@ COMMUTER_ACTIVITY_SHEET=RAW DATA
 GOOGLE_APPLICATION_CREDENTIALS=/absolute/private/path/credentials.json
 COMMUTER_TRAINING_CACHE_DIR=/absolute/private/path/training-cache
 COMMUTER_REPORTING_TIMEZONE=America/Denver
-COMMUTER_TRAINING_RECENT_DAYS=7
-COMMUTER_TRAINING_MAX_ACTIVITIES=5
-COMMUTER_TRAINING_TIME_BUDGET_S=90
 ```
 
-Protect the environment and credential files with mode `0600`. `credentials.json`
-is ignored by Git. Local defaults use `training-cache` alongside the configured
-database and a worksheet named `Activities` if no activity title is supplied.
+The adapter uses Google's official Sheets SDK and spreadsheet write scope.
+Secrets stay outside the workbook and source control. `RAW DATA` contains one
+row per text Strava activity ID. Other managed tabs provide zone time, weekly
+summaries, settings, sync status, and Dashboard charts. Manual inputs and
+analysis remain in user-owned ranges; sync preserves user charts and formulas.
+
+Imported measurements retain native units: distance in metres, durations and
+pace in seconds, and heart rate in bpm. Dates use ISO format and weeks begin
+Monday in the configured timezone. Missing values are blank and accompanied by
+availability information; real zeroes remain numeric.
+
+### Heart-rate and pace calculations
+
+HR uses a trailing time-weighted window up to three available seconds. Shorter
+valid windows (one or two seconds) are used when less data is available. Pace
+uses matched distance and time over the same rolling window. Windows reset at
+invalid measurements, recording gaps, or pauses; no duration is extrapolated
+past the final stream sample. The gap cutoff defaults to the greater of three
+seconds and three times the median positive sample interval, and the actual
+cutoff is recorded with the result.
+
+Strava-reported running and cycling zone totals are exported separately for
+inspection. Manual boundaries can be entered in `Settings` with sport,
+effective date, version, lower/upper bpm, confirmation, gap cutoff, source, and
+retrospective flag. Boundaries must be ordered and contiguous; lower limits
+are inclusive and upper limits exclusive. A blank upper limit is unbounded for
+the final zone. Current settings applied to older activity must be labelled as
+retrospective. Zone charts show unknown/unassigned time separately, and
+percentages use classified time as their denominator.
+
+### Dashboard
+
+Weekly charts cover the current week and the previous eleven weeks. They show
+moving duration by category, running mileage, non-commute training minutes,
+and HR zones by sport. Hiking and commute activities are excluded from
+training totals. The rolling duration charts show trailing seven-calendar-day
+run and non-commute bike totals. The running, biking, and combined HR zone pie
+charts cover the last seven reporting dates, exclude commutes, and show
+unknown time as a separate slice.
+
+## Development
 
 ```sh
-uv run commuter sheets-setup
-uv run commuter training-backfill --months 2
-uv run commuter training-backfill --resume
-uv run commuter sync --processors sheets
-uv run commuter sync --processors commuter,sheets
-uv run commuter training-refresh --activity-id ACTIVITY_ID
-uv run commuter training-recalculate
-uv run commuter training-reconcile
+uv run pytest
 ```
 
-Backfill captures exact timestamps two calendar months apart and resumes that
-same range. Sync and backfill process bounded batches; repeat them when `pending=True`.
-`training-recalculate` without `--max-activities` processes all cached data,
-automatically continuing after a batch reaches its time budget. Specify
-`--max-activities` to process only a bounded batch. Errors stop the command with
-remaining work saved for resumption; a batch that makes no progress also stops.
-Dry runs remain bounded by the run time budget and do not auto-resume.
-Sheets requests retry HTTP 429 and transient server errors up to seven times.
-Retries honor `Retry-After` (seconds or an HTTP date) and use exponential backoff
-with jitter, capped at 64 seconds, when no longer server delay is specified.
-All Sheets requests in the run respect the cooldown. If the wait cannot fit
-within `COMMUTER_TRAINING_TIME_BUDGET_S`, the export stays pending for a later run.
-For larger recalculation batches, allow more time for quota recovery:
+The Cloudflare Worker has its own TypeScript build:
 
 ```sh
-COMMUTER_TRAINING_TIME_BUDGET_S=300 uv run commuter training-recalculate --max-activities 20
+npm ci
+npm run build
 ```
-
-Repeat the same command until `pending=False`; completed rows are upserted safely.
-A normal Sheets-enabled `sync` selects both processors, refreshes the last seven
-days, resumes an existing backfill when its remaining budget permits, and performs
-weekly full-ID reconciliation after backfill starts. Missing IDs become pending
-review; `training-remove --activity-id ACTIVITY_ID` confirms a reporting tombstone.
-That command does not delete a Strava activity. `--dry-run` computes results
-without exporting or changing processing/cache checkpoints. It still reads APIs
-and may refresh an expired credential.
-
-Keep the existing 15-minute systemd timer; no second scheduler is needed. On the
-Pi, put the above settings in `/etc/commuter/commuter.env`, use absolute writable
-state paths under `/var/lib/commuter`, and install locked dependencies in the
-service's Python 3.13 environment. Run setup and the first backfill with that
-same environment file loaded. Back up the database, private configuration,
-Google credentials, and application-owned raw cache using the existing backup
-process. Actual Pi installation/restart checks require access to that host.
-
-### Measurements and ownership
-
-`RAW DATA` (or the configured activity tab) has one row per text Strava ID.
-Distances use metres; durations and pace use seconds, HR uses bpm, and running
-miles use metres / 1609.344. Dates are ISO text: UTC timestamps include a UTC
-explicit offset, reporting dates/weeks use `YYYY-MM-DD`, and weeks begin Monday
-in the configured timezone. Real zeros remain numeric; missing measurements are
-blank with availability columns. Schema version `1` uses stable column order.
-
-HR uses a trailing time-weighted window of **up to three available seconds**.
-One or two trusted seconds are usable at startup or after an invalid interval;
-a full three seconds is used whenever available. Each HR sample holds until
-the next timestamp, and distance is interpolated linearly within recorded
-intervals. Pace requires trusted distance and continuous movement. Windows
-reset after invalid measurements, recording gaps, or pauses for pace; nothing
-is extrapolated beyond the final sample.
-
-The automatic recording-gap cutoff is the larger of three seconds and three
-times the recording's median positive timestamp interval. Thus ordinary
-four-second recordings use a twelve-second cutoff; longer gaps remain unknown.
-`COMMUTER_TRAINING_MAX_GAP_S` or a selected dated zone setting can override it.
-`recording_gap_cutoff_s` records the actual cutoff, `rolling_window_s` records
-the maximum window, and method version `hr-pace-available-trailing-3s-v2`
-identifies the calculation. Sparse-sample interpolation is an estimate within
-the accepted recording cadence, rather than extra measured samples.
-
-The activity row retains Strava average/max HR and workout moving/elapsed pace
-separately from rolling measurements. Its rolling HR mean weights valid rolling
-samples by interval duration; rolling pace aggregates matched valid duration and
-speed-derived distance. Raw per-sample time/HR/distance/movement streams remain
-in owner-only cache files, indexed by athlete/activity ID. The workbook stores
-activity summaries and later per-zone totals, rather than sample arrays.
-
-Strava's reported running and cycling HR zones are fetched with each activity,
-cached, and exported in `Strava HR Zones`, including the exact returned bpm
-bounds, seconds, sport, sensor flag, and boundary version. These results use
-method `strava-reported-v1`; they are platform calculations, independent of our
-rolling algorithm and any review of your personal thresholds. In the absence
-of confirmed custom settings, they also populate `Zone Time`, weekly summaries,
-and HR charts. Unassigned elapsed duration is shown separately as unknown.
-A missing or restricted Strava zone response stays unavailable; measurements
-still export. Running and cycling may have different returned boundaries.
-For manual inspection, `Analysis!A7:E` contains a deduplicated catalog of the
-imported boundaries by sport, zone, and settings version. Bounds are numeric;
-a blank upper bound means unbounded. Older imported versions remain visible.
-Python owns this catalog range and refuses to expand it into occupied user
-cells. Keep formulas and manual analyses outside this reserved range.
-
-Leave `Settings` empty to use those platform results without choosing a custom
-zone method. Later, supply one row per zone with sport `run`
-or `cycling`, effective date, version, lower/upper bpm, confirmation, recording-gap
-cutoff, method source, and retrospective flag. Boundaries must be contiguous and
-ordered, with inclusive lower and exclusive upper bounds; a blank upper bound
-is allowed for the final zone. Confirm personal methods/boundaries before marking
-settings confirmed. Current settings applied retrospectively must be labelled.
-`effective_from` is the earliest activity date that uses these boundaries, not
-the date you entered them. The `retrospective` flag labels historical use; it
-does not override that cutoff. To apply current boundaries to all imported
-history, set the date on every zone row for each sport to the earliest imported
-activity date (for example, `2026-07-11`), and set `retrospective` to `TRUE`.
-Earlier workouts otherwise retain Strava-reported zones when available.
-
-Settings edits take effect when an activity is processed again. Recalculate
-cached activities and their Dashboard summaries with:
-
-```sh
-uv run commuter training-recalculate
-```
-
-Cached recalculation makes no Strava requests. Omit `--max-activities` to finish
-all cached data in one command; use it for resumable bounded batches.
-Existing Z1–Z5 boundaries do not require rebuilding charts.
-Custom-calculated zone duration uses recorded elapsed stream time; valid percentages
-use classified seconds, excluding unknown time. Moving and elapsed workout
-seconds remain visible. Weekly ratios use aggregated matched inputs instead of
-averaging workout percentages or paces. Different settings versions are separate
-in zone summaries and chart labels.
-
-Python owns reporting tables, summary/chart source tables, and `Sync Log`.
-Keep manual category/source overrides, notes, and RPE in `Manual Inputs`, keyed by
-text activity ID. Overrides change reporting, not commute side effects. Edit
-formulas and additional analyses in `Analysis` or separate tabs. Ordinary sync
-preserves those formulas, formatting, and chart edits; explicit
-`--refresh-charts` replaces only recorded managed chart IDs. Do not reorder
-writer-owned columns. Row sorting is supported because indexes are rebuilt;
-duplicate IDs or incompatible headers stop export.
-
-Exports upsert by activity ID, replace obsolete zone rows, and clear stale cells.
-A shared process lock prevents overlapping local writers. Activity completion
-follows raw writes and rebuilt summaries; a crash can replay the same IDs safely.
-Quota limits come from Strava headers; throttled work remains resumable. `Sync Log`
-distinguishes partial attempts from the last fully successful sync. Disconnect
-and local wipe also remove application-owned cached streams; existing Sheets
-rows and Discord messages remain separately managed. The existing commute path
-can repeat a Discord notification after a crash between notification and local
-completion; it does not guarantee exactly-once remote delivery.
-
-Advanced training-load methods and webhook delivery are deferred. Live validation
-of zone calculations against Garmin/Strava remains pending personal boundaries.
-
-### Dashboard range and duration charts
-
-Dashboard weekly and duration charts cover the current Monday-based week and the preceding eleven
-weeks in the reporting timezone. Weekly totals include duration by category,
-running mileage, non-commute minutes, and sport-separated HR zone minutes.
-The duration stack includes running, virtual biking, bike commutes, other
-biking, and other activities. Each stack shows total moving minutes including
-commutes; the non-commute training chart excludes flagged commutes and Strava
-Hike activities. Hikes remain visible in RAW DATA and the all-activity duration
-stack, but do not contribute to training duration, rolling run/bike duration,
-running mileage, or HR zone summaries and pies, even with a category override.
-Other activity types retain their existing behavior.
-Minute labels use one decimal place while stored values retain full precision.
-The Chart Data schema appends other-biking and other-activity columns without
-moving existing chart inputs.
-Daily line charts show trailing seven-calendar-day moving minutes for running
-and non-commute biking (virtual and outdoor rides). Commute flags and the
-`bike_commute` category exclude a ride from these non-commute totals. Missing
-activities cannot be inferred from an empty calendar day.
-
-Three pie charts show running, non-commute biking, and combined HR zone minutes
-for today and the previous six reporting calendar dates. They exclude both
-source/effective commute flags and the commute category. Biking includes
-virtual and outdoor rides. Unknown/unassigned elapsed time is a separate slice,
-including workouts with missing HR. Combined slices sum sport-relative zone
-labels using each sport's own boundaries; they do not imply identical bpm
-ranges. Sources rebuild from current activities and zone rows on each sync.
-
-`commuter sheets-setup` adds the new pies to an existing Dashboard without
-recreating existing charts. Once registered, a manually deleted pie stays
-deleted during ordinary setup/sync. The default layout omits the weekly commute
-HR chart. `--refresh-charts` explicitly recreates the managed layout.
-
-The weekly rolling pace chart has been removed; its existing source column
-remains reserved to preserve column order. Ordinary sync refreshes chart data
-without recreating user-edited charts. To apply this Dashboard layout once:
-
-```bash
-commuter sheets-setup --refresh-charts
-commuter training-backfill --months 3 --max-activities 20
-```
-
-The three-month backfill has its own fixed, resumable checkpoint, preserving
-the original two-month import. It also provides the six seed days needed for
-the first seven-day total. Repeat the command until pending work is complete;
-historical backfill reuses cached details/streams and fetches missing zone data.
-Use `training-refresh --activity-id ID` to refetch an older edited activity.

@@ -406,8 +406,13 @@ def _training_command(
                             months=getattr(arguments, "months", 2),
                             max_activities=arguments.max_activities,
                             dry_run=arguments.dry_run,
-                            recheck_non_matches=getattr(
-                                arguments, "recheck_non_matches", False
+                            recheck_non_matches=(
+                                getattr(arguments, "recheck_non_matches", False)
+                                or (
+                                    mode == "sync"
+                                    and after is not None
+                                    and {"commuter", "sheets"}.issubset(selected)
+                                )
                             ),
                             verbose=arguments.verbose,
                             commute_after=after,
@@ -415,7 +420,36 @@ def _training_command(
                         )
 
                     result = await batch(deadline)
-                    if mode == "sync" and not arguments.dry_run and not result.errors and not result.pending:
+                    full_window_replay = (
+                        mode == "sync"
+                        and after is not None
+                        and arguments.max_activities is None
+                        and "sheets" in selected
+                        and not arguments.dry_run
+                    )
+                    if full_window_replay:
+                        while result.pending and not result.errors:
+                            progress_before = _sync_progress_marker(
+                                store, settings.spreadsheet_id
+                            )
+                            extra = await batch(
+                                time.monotonic() + settings.training_time_budget_s
+                            )
+                            result.exported.extend(extra.exported)
+                            result.errors.extend(extra.errors)
+                            result.pending = extra.pending
+                            progress_after = _sync_progress_marker(
+                                store, settings.spreadsheet_id
+                            )
+                            if not extra.exported and progress_before == progress_after:
+                                break
+                    if (
+                        mode == "sync"
+                        and not full_window_replay
+                        and not arguments.dry_run
+                        and not result.errors
+                        and not result.pending
+                    ):
                         accounts = store.list_accounts()
                         athlete = accounts[0].athlete.id
                         history = store.get_progress(
@@ -485,3 +519,18 @@ def _training_command(
     finally:
         if store:
             store.close()
+
+
+def _sync_progress_marker(store, workbook: str):
+    """Return durable sync progress fields used to detect a stalled replay batch."""
+
+    accounts = store.list_accounts()
+    if len(accounts) != 1:
+        return None
+    progress = store.get_progress(accounts[0].athlete.id, workbook, "sync") or {}
+    return (
+        progress.get("page"),
+        len(progress.get("ids", {})),
+        len(progress.get("done", [])),
+        progress.get("complete", False),
+    )

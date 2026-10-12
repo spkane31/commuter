@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import calendar
+import sys
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -164,6 +165,8 @@ async def synchronize_training(
         max_activities = (
             max(1, len(cache.activity_ids(athlete)))
             if mode == "recalculate"
+            else sys.maxsize
+            if mode == "sync" and commute_after is not None and "sheets" in selected
             else settings.training_max_activities
         )
     if (
@@ -227,7 +230,15 @@ async def synchronize_training(
                 "done": [],
                 "discovered": True,
             }
-    elif progress is None or (progress.get("complete") and mode != "backfill"):
+    elif (
+        progress is None
+        or (progress.get("complete") and mode != "backfill")
+        or (
+            mode == "sync"
+            and commute_after is not None
+            and not progress.get("explicit_window")
+        )
+    ):
         end = int(now.timestamp())
         local = now.astimezone(ZoneInfo(settings.reporting_timezone))
         history = store.get_progress(athlete, workbook, "history")
@@ -242,13 +253,17 @@ async def synchronize_training(
                 if history
                 else int(history_start(local, months).timestamp())
             )
-        training_after = after
-        if mode == "sync" and "commuter" in selected and configuration:
+        training_after = (
+            commute_after
+            if mode == "sync" and commute_after is not None
+            else after
+        )
+        if mode == "sync" and commute_after is not None:
+            after = commute_after
+        elif mode == "sync" and "commuter" in selected and configuration:
             after = min(
                 after,
-                commute_after
-                if commute_after is not None
-                else configuration.created_at,
+                configuration.created_at,
             )
         progress = {
             "after": after,
@@ -258,6 +273,7 @@ async def synchronize_training(
             "ids": {},
             "done": [],
             "discovered": False,
+            "explicit_window": commute_after is not None,
         }
     if progress.get("complete") and mode == "backfill":
         return result
@@ -277,7 +293,7 @@ async def synchronize_training(
     if progress.get("settings_snapshot") not in (None, snapshot):
         progress["done"] = []
     progress["settings_snapshot"] = snapshot
-    if mode == "sync":
+    if mode == "sync" and commute_after is None:
         for state in store.training_states(athlete, workbook):
             if state["status"] in {"failed", "uploaded"}:
                 progress["ids"].setdefault(str(state["activity_id"]), {})
