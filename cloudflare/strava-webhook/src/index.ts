@@ -5,8 +5,6 @@ interface Env {
   TEMPORAL_API_KEY: string;
   TEMPORAL_ADDRESS: string;
   TEMPORAL_NAMESPACE: string;
-  STRAVA_ATHLETE_ID: string;
-  STRAVA_SUBSCRIPTION_ID: string;
 }
 
 interface StravaEvent {
@@ -43,9 +41,6 @@ export default {
     try {
       const rawBody = await readBoundedBody(request, MAX_EVENT_BYTES);
       const event = parseEvent(rawBody);
-      if (!matchesConfiguredStravaAccount(event, env)) {
-        return new Response("Unexpected Strava subscription or athlete", { status: 403 });
-      }
 
       const connection = await Connection.connect({
         address: env.TEMPORAL_ADDRESS,
@@ -115,18 +110,6 @@ function parseEvent(rawBody: string): StravaEvent {
     throw new Error("invalid_event");
   }
   return event as StravaEvent;
-}
-
-function matchesConfiguredStravaAccount(event: StravaEvent, env: Env): boolean {
-  const athleteId = Number(env.STRAVA_ATHLETE_ID);
-  const configuredSubscriptionId = env.STRAVA_SUBSCRIPTION_ID.trim();
-  const subscriptionId = Number(configuredSubscriptionId);
-  return (
-    Number.isSafeInteger(athleteId) &&
-    event.owner_id === athleteId &&
-    (!configuredSubscriptionId ||
-      (Number.isSafeInteger(subscriptionId) && event.subscription_id === subscriptionId))
-  );
 }
 
 function workflowIdFor(event: StravaEvent): string {
