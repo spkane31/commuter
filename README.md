@@ -179,54 +179,73 @@ over SSH, then visit `http://127.0.0.1:8000` in that computer's browser:
 ssh -L 8000:127.0.0.1:8000 pi@commuter-pi
 ```
 
-## Linux Temporal webhook worker
+## Cloudflare Queue and Linux Temporal worker
 
-The Cloudflare Strava receiver submits workflows named
-`processStravaEvent` to the fixed `commuter-strava` task queue. Install this
-separate worker on a durable Linux host (for example, the desktop) to poll that
-queue. It reuses the activity refresh and processor pipeline; Google Sheets
-must be enabled, and the host must have access to the configured Google service
-account file. The worker-only installer does not enable a polling timer. If
-you later add scheduled reconciliation, run it on this same host so its local
-process lock coordinates Sheets writes with webhook work.
+The Cloudflare Worker verifies Strava subscription challenges and publishes
+validated event JSON to the `commuter` Cloudflare Queue. The Linux desktop pulls
+messages outbound over HTTPS, starts `processStravaEvent` on the fixed
+`commuter-strava` Temporal task queue, and acknowledges a message only after
+Temporal accepts the workflow. No inbound port, tunnel, or public Linux server
+is needed. The Linux host needs its local Commuter database, Strava token,
+Google Sheets credentials, and Temporal credentials.
 
-1. Pull the repository changes and run the worker-only installer:
+### Configure Cloudflare
+
+1. In Cloudflare Queues, create the queue named `commuter` if it does not
+   already exist. The repository's `wrangler.jsonc` producer binding expects
+   that exact name. The producer binding does not enable the HTTP pull
+   consumer. From this repository, enable it once with
+   `npx wrangler queues consumer http add commuter` (or enable HTTP pull in the
+   dashboard). Use a dead-letter queue and a retry count appropriate for
+   recovering from a prolonged desktop or Temporal outage. Do not configure a
+   push consumer to a local endpoint. Cloudflare documents the [HTTP pull
+   consumer API](https://developers.cloudflare.com/queues/configuration/pull-consumers/).
+2. Create a Cloudflare API token scoped to this account with Queues read/write
+   permissions. Keep this token for the Linux host only. Record the account ID
+   and queue's opaque ID from the Cloudflare dashboard/API.
+3. Configure `STRAVA_VERIFY_TOKEN` as a Worker secret. The Worker no longer
+   needs Temporal address, namespace, or API key, and it does not validate the
+   athlete or subscription IDs. Remove unused Temporal secrets from Worker
+   settings. The receiver returns success only after the event has been
+   published; a publish failure returns 503 so Strava can retry.
+4. Let the Git-connected Cloudflare build deploy the `wrangler.jsonc` producer
+   binding after the queue exists. Verify `GET /strava` challenge succeeds
+   before creating the Strava subscription.
+
+### Configure the Linux worker
+
+1. Pull the repository changes and run the installer:
 
    ```sh
    cd /path/to/commuter
    make install-temporal-worker
    ```
 
-   On its first run, `make install-temporal-worker` installs dependencies and
-   state/config directories, creates `/etc/commuter/commuter.env`, and exits.
-   Edit it without printing the secrets:
-
-   ```sh
-   sudoedit /etc/commuter/commuter.env
-   ```
-
-   Fill in the existing Strava/Discord settings and Sheets configuration. Set
-   `COMMUTER_SHEETS_ENABLED=true`, the workbook ID, and
-   `GOOGLE_APPLICATION_CREDENTIALS` to a credentials file readable by the
-   service user. Add the Temporal Cloud values:
+   On its first run it creates `/etc/commuter/commuter.env` and exits. Edit the
+   file with `sudoedit /etc/commuter/commuter.env`; do not print or paste
+   secrets. Configure the existing Strava and Discord settings, enable Sheets,
+   set the workbook ID and Google credentials path, and configure:
 
    ```text
-   TEMPORAL_ADDRESS=<your-namespace-address>.tmprl.cloud:7233
-   TEMPORAL_NAMESPACE=<your-namespace>.<account-id>
+   TEMPORAL_ADDRESS=<namespace-address>.tmprl.cloud:7233
+   TEMPORAL_NAMESPACE=<namespace>.<account-id>
    TEMPORAL_API_KEY=<Temporal Cloud API key>
+   CLOUDFLARE_ACCOUNT_ID=<Cloudflare account ID>
+   CLOUDFLARE_QUEUE_ID=<opaque queue ID for queue named commuter>
+   CLOUDFLARE_API_TOKEN=<account-scoped Queues read/write token>
    ```
 
-   Protect the file and, if credentials are stored under a different path,
-   make that file readable only by root and the Commuter service user/group.
-   Never put secrets in Git or paste them into command arguments.
+   Optional queue poll, retry, and visibility timeout values are documented in
+   `deploy/systemd/commuter.env.example`. Protect this environment file and
+   Google credential file from other local users. The installer checks that
+   required values exist without displaying them.
 
-   Before making the database backup, stop the Pi polling service; leave it
-   disabled while the desktop worker owns event processing. The desktop also
-   needs the Commuter SQLite account/configuration database
-   because it holds the Strava refresh token and commute settings. If the Pi is
-   the current owner of that state, create a consistent SQLite backup there,
-   transfer it over SSH, and install it with owner-only permissions on the
-   desktop before starting the worker:
+2. The desktop needs the Commuter SQLite database because it contains the
+   Strava refresh token and local configuration. Stop the Pi sync timer before
+   moving event ownership. Make a consistent SQLite backup on the Pi, transfer
+   it over SSH, install it on the desktop with mode 0600, then remove the
+   temporary copy. Do not share a live SQLite database over the network. For
+   example:
 
    ```sh
    # On the Pi
@@ -241,54 +260,29 @@ process lock coordinates Sheets writes with webhook work.
    sudo install -o "$USER" -g "$(id -gn)" -m 0600 \
      ./commuter-worker.db /var/lib/commuter/commuter.db
    rm ./commuter-worker.db
-   # On the Pi, remove its temporary backup after transfer
    ssh pi@raspberrypi 'rm /var/lib/commuter/commuter-worker.db'
    ```
 
-   Treat the backup as a secret because it contains Strava tokens. The worker
-   uses this desktop database; the Pi and desktop do not share SQLite over the
-   network.
-
-2. Run the worker target again to install and start the systemd worker. It
-   checks that the Temporal settings are present, renders the unit for this
-   checkout and service account, reloads systemd, enables the worker at boot,
-   and starts it now:
-
-   ```sh
-   make install-temporal-worker
-   ```
-
-   The unit is `commuter-temporal-worker.service`. It restarts on failure and
-   runs `commuter temporal-worker`, which connects to Temporal Cloud with TLS
-   and polls `commuter-strava`.
-
-3. Verify the service is active and inspect recent logs:
+3. Run `make install-temporal-worker` again. It syncs dependencies, renders and
+   verifies `commuter-temporal-worker.service`, enables it at boot, and starts
+   it. The service runs both the Cloudflare Queue puller and the Temporal
+   activity worker; both connections are outbound. Check it with:
 
    ```sh
    sudo systemctl status --no-pager commuter-temporal-worker.service
    sudo journalctl -u commuter-temporal-worker.service -n 100 --no-pager
    ```
 
-   In Temporal Cloud, start a workflow with type `processStravaEvent`, task
-   queue `commuter-strava`, and a fresh workflow ID. Use a known activity that
-   is already present in the workbook so the activity can be safely replayed.
-   The JSON input is one Strava event object:
+### Verify end to end
 
-   ```json
-   {
-     "aspect_type": "update",
-     "event_time": 1791500000,
-     "object_id": 123456789,
-     "object_type": "activity",
-     "owner_id": 12345678,
-     "subscription_id": 1
-   }
-   ```
-
-   Replace the example IDs with the connected athlete/activity IDs; the
-   subscription ID can be any positive integer for this direct Temporal test.
-   Confirm the workflow completes and the activity remains correctly exported.
-   Do not create the Strava subscription until this queue test succeeds.
+First start a `processStravaEvent` workflow manually in Temporal with a known
+activity, the correct connected athlete ID, and task queue `commuter-strava`.
+After that succeeds, trigger a real Strava update and verify the Worker log,
+Queue message metrics, Temporal workflow history, Linux journal, and resulting
+sheet row. Queue delivery is at-least-once: stable workflow IDs and idempotent
+sheet upserts handle redelivery if the process stops between workflow start
+and message acknowledgement. The Temporal activity validates event ownership
+against the local database.
 
 Useful service commands:
 
@@ -300,15 +294,11 @@ sudo systemctl enable --now commuter-temporal-worker.service
 sudo journalctl -fu commuter-temporal-worker.service
 ```
 
-After pulling code changes, run `make install-temporal-worker` again to sync
-the lockfile, render the unit, and restart/enable the service. This worker-only
-target does not install a polling timer or start the local web server. If you
-later restore periodic reconciliation, install it on this host and do not run
-the same poller from the Pi. The target requires non-empty `TEMPORAL_ADDRESS`,
-`TEMPORAL_NAMESPACE`, and
-`TEMPORAL_API_KEY` entries in the environment file; it does not echo their
-values. Until a reconciliation timer is configured, run the existing sync or
-training-reconcile command manually when you need to check for missed events.
+After code updates, run `make install-temporal-worker` again. It does not
+install a polling timer or start the local web server. Do not run the same
+activity processor on the Pi while the desktop owns the database and event
+consumer. Periodic reconciliation remains a separate manual sync/reconcile
+operation until a schedule is configured on the desktop.
 
 ## Configure and poll commuter rides
 

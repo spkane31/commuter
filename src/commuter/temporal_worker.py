@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 from typing import Any
 
@@ -23,7 +24,9 @@ def _required_environment(name: str) -> str:
 
 
 async def run_temporal_worker() -> None:
-    """Connect to Temporal Cloud and poll the queue used by the webhook."""
+    """Run the Temporal activity worker and the Cloudflare Queue puller."""
+
+    from commuter.temporal_queue import run_cloudflare_queue_poller
 
     client = await Client.connect(
         _required_environment("TEMPORAL_ADDRESS"),
@@ -37,20 +40,22 @@ async def run_temporal_worker() -> None:
         workflows=[ProcessStravaEvent],
         activities=[process_strava_event],
     )
-    await worker.run()
+    async with asyncio.TaskGroup() as task_group:
+        task_group.create_task(worker.run())
+        task_group.create_task(run_cloudflare_queue_poller(client))
 
 
 @activity.defn(name="process_strava_event")
 async def process_strava_event(event: dict[str, Any]) -> dict[str, Any]:
     """Refresh and process one notified activity using the existing pipeline."""
 
+    from commuter.auth import TokenManager
     from commuter.config import Settings
     from commuter.pipeline import synchronize_training
     from commuter.sheets import SheetsAdapter
     from commuter.state import SourceCache, process_lock
     from commuter.store import CredentialStore
     from commuter.strava import StravaClient
-    from commuter.auth import TokenManager
 
     event = _validate_event(event)
     if event["object_type"] == "athlete":
@@ -99,7 +104,11 @@ async def process_strava_event(event: dict[str, Any]) -> dict[str, Any]:
                         selected=("commuter", "sheets"),
                         activity_id=event["object_id"],
                     )
-            if result.errors or result.pending or event["object_id"] not in result.exported:
+            if (
+                result.errors
+                or result.pending
+                or event["object_id"] not in result.exported
+            ):
                 raise RuntimeError(
                     "; ".join(result.errors)
                     or "Strava activity processing did not complete its Sheets export"
@@ -136,9 +145,7 @@ async def _remove_deleted_activity(settings, athlete_id: int, activity_id: int) 
                 non_retryable=True,
             )
         with process_lock(settings.database_path.with_suffix(".sync.lock")):
-            await adapter.reconcile(
-                set(), 0, 0, confirmed_removal=str(activity_id)
-            )
+            await adapter.reconcile(set(), 0, 0, confirmed_removal=str(activity_id))
             await adapter.finish("success", "Strava activity deletion processed")
             store.save_training_state(
                 athlete_id,
@@ -162,5 +169,7 @@ def _validate_event(value: Any) -> dict[str, Any]:
         raise ApplicationError("Unsupported Strava event aspect", non_retryable=True)
     for key in ("object_id", "owner_id", "subscription_id", "event_time"):
         if type(value.get(key)) is not int or value[key] <= 0:
-            raise ApplicationError(f"Invalid Strava event field: {key}", non_retryable=True)
+            raise ApplicationError(
+                f"Invalid Strava event field: {key}", non_retryable=True
+            )
     return value

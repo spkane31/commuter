@@ -1,10 +1,6 @@
-import { Client, Connection } from "@temporalio/client";
-
 interface Env {
   STRAVA_VERIFY_TOKEN: string;
-  TEMPORAL_API_KEY: string;
-  TEMPORAL_ADDRESS: string;
-  TEMPORAL_NAMESPACE: string;
+  commuter: Queue;
 }
 
 interface StravaEvent {
@@ -18,8 +14,6 @@ interface StravaEvent {
 }
 
 const MAX_EVENT_BYTES = 32 * 1024;
-const TEMPORAL_TASK_QUEUE = "commuter-strava";
-const TEMPORAL_WORKFLOW_TYPE = "processStravaEvent";
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -42,28 +36,10 @@ export default {
       const rawBody = await readBoundedBody(request, MAX_EVENT_BYTES);
       const event = parseEvent(rawBody);
 
-      const connection = await Connection.connect({
-        address: env.TEMPORAL_ADDRESS,
-        apiKey: env.TEMPORAL_API_KEY,
-        tls: true,
-      });
-      try {
-        const client = new Client({ connection, namespace: env.TEMPORAL_NAMESPACE });
-        await client.workflow.start(TEMPORAL_WORKFLOW_TYPE, {
-          workflowId: workflowIdFor(event),
-          taskQueue: TEMPORAL_TASK_QUEUE,
-          args: [event],
-          workflowIdReusePolicy: "ALLOW_DUPLICATE_FAILED_ONLY",
-        });
-      } finally {
-        await connection.close();
-      }
+      await env.commuter.send(JSON.stringify(event), { contentType: "text" });
 
       return new Response("EVENT_RECEIVED", { status: 200 });
     } catch (error) {
-      if (isAlreadyStarted(error)) {
-        return new Response("EVENT_RECEIVED", { status: 200 });
-      }
       // Do not acknowledge: Strava will retry transient failures.
       console.error("Unable to enqueue Strava event", safeErrorDetails(error));
       return new Response("Unable to enqueue event", { status: 503 });
@@ -110,26 +86,6 @@ function parseEvent(rawBody: string): StravaEvent {
     throw new Error("invalid_event");
   }
   return event as StravaEvent;
-}
-
-function workflowIdFor(event: StravaEvent): string {
-  return [
-    "strava",
-    event.subscription_id,
-    event.object_type,
-    event.object_id,
-    event.aspect_type,
-    event.event_time,
-  ].join(":");
-}
-
-function isAlreadyStarted(error: unknown): boolean {
-  return (
-    typeof error === "object" &&
-    error !== null &&
-    "name" in error &&
-    (error as { name?: unknown }).name === "WorkflowExecutionAlreadyStartedError"
-  );
 }
 
 function safeErrorDetails(error: unknown): { name: string; message: string } {

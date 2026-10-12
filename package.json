@@ -7,9 +7,6 @@
     "dev": "wrangler dev",
     "types": "wrangler types"
   },
-  "dependencies": {
-    "@temporalio/client": "1.24.0"
-  },
   "devDependencies": {
     "wrangler": "4.149.0"
   }

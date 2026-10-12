@@ -61,7 +61,7 @@ def main() -> None:
         "sync", help="Poll Strava and update newly configured commuter rides"
     )
     subcommands.add_parser(
-        "temporal-worker", help="Poll Temporal Cloud for Strava webhook workflows"
+        "temporal-worker", help="Pull Strava events from Cloudflare and run Temporal workflows"
     )
     sync_parser.add_argument(
         "--processors",

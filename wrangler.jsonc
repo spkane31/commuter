@@ -7,8 +7,15 @@
     "keep_vars": true,
     "secrets": {
         "required": [
-            "STRAVA_VERIFY_TOKEN",
-            "TEMPORAL_API_KEY"
+            "STRAVA_VERIFY_TOKEN"
+        ]
+    },
+    "queues": {
+        "producers": [
+            {
+                "binding": "commuter",
+                "queue": "commuter"
+            }
         ]
     },
     "observability": {

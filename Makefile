@@ -47,6 +47,9 @@ install-temporal-worker:
 	@sudo grep -Eq '^TEMPORAL_ADDRESS=.+$$' "$(ENV_FILE)" || { echo "Set TEMPORAL_ADDRESS in $(ENV_FILE)."; exit 1; }
 	@sudo grep -Eq '^TEMPORAL_NAMESPACE=.+$$' "$(ENV_FILE)" || { echo "Set TEMPORAL_NAMESPACE in $(ENV_FILE)."; exit 1; }
 	@sudo grep -Eq '^TEMPORAL_API_KEY=.+$$' "$(ENV_FILE)" || { echo "Set TEMPORAL_API_KEY in $(ENV_FILE)."; exit 1; }
+	@sudo grep -Eq '^CLOUDFLARE_ACCOUNT_ID=.+$$' "$(ENV_FILE)" || { echo "Set CLOUDFLARE_ACCOUNT_ID in $(ENV_FILE)."; exit 1; }
+	@sudo grep -Eq '^CLOUDFLARE_QUEUE_ID=.+$$' "$(ENV_FILE)" || { echo "Set CLOUDFLARE_QUEUE_ID in $(ENV_FILE)."; exit 1; }
+	@sudo grep -Eq '^CLOUDFLARE_API_TOKEN=.+$$' "$(ENV_FILE)" || { echo "Set CLOUDFLARE_API_TOKEN in $(ENV_FILE)."; exit 1; }
 	@sudo grep -Eq '^STRAVA_CLIENT_ID=.+$$' "$(ENV_FILE)" || { echo "Set STRAVA_CLIENT_ID in $(ENV_FILE)."; exit 1; }
 	@sudo grep -Eq '^STRAVA_CLIENT_SECRET=.+$$' "$(ENV_FILE)" || { echo "Set STRAVA_CLIENT_SECRET in $(ENV_FILE)."; exit 1; }
 	@sudo grep -Eq '^COMMUTER_SHEETS_ENABLED=true$$' "$(ENV_FILE)" || { echo "Set COMMUTER_SHEETS_ENABLED=true in $(ENV_FILE)."; exit 1; }

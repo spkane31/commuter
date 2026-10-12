@@ -39,3 +39,5 @@ training-cache/
 *.token.lock
 
 credentials.json
+
+.wrangler/
