@@ -200,9 +200,14 @@ Google Sheets credentials, and Temporal credentials.
    recovering from a prolonged desktop or Temporal outage. Do not configure a
    push consumer to a local endpoint. Cloudflare documents the [HTTP pull
    consumer API](https://developers.cloudflare.com/queues/configuration/pull-consumers/).
-2. Create a Cloudflare API token scoped to this account with Queues read/write
-   permissions. Keep this token for the Linux host only. Record the account ID
-   and queue's opaque ID from the Cloudflare dashboard/API.
+2. Create a restricted pull-consumer token in the Cloudflare dashboard:
+   **My Profile → API Tokens → Create Token → Create Custom Token**. Name it
+   `commuter-linux-queue-pull`; under **Permissions**, choose **Account → Queues
+   → Edit** (the required `queues_read` and `queues_write` permissions); under
+   **Account Resources**, select only the account that owns this queue. Create
+   the token and copy it once. Store it only in `/etc/commuter/commuter.env` on
+   Linux, never in Wrangler or Git. Find the Account ID under the account's
+   **Overview** and the Queue ID under **Workers & Pages → Queues → commuter**.
 3. Configure `STRAVA_VERIFY_TOKEN` as a Worker secret. The Worker no longer
    needs Temporal address, namespace, or API key, and it does not validate the
    athlete or subscription IDs. Remove unused Temporal secrets from Worker
@@ -275,14 +280,29 @@ Google Sheets credentials, and Temporal credentials.
 
 ### Verify end to end
 
-First start a `processStravaEvent` workflow manually in Temporal with a known
-activity, the correct connected athlete ID, and task queue `commuter-strava`.
-After that succeeds, trigger a real Strava update and verify the Worker log,
-Queue message metrics, Temporal workflow history, Linux journal, and resulting
-sheet row. Queue delivery is at-least-once: stable workflow IDs and idempotent
-sheet upserts handle redelivery if the process stops between workflow start
-and message acknowledgement. The Temporal activity validates event ownership
-against the local database.
+Check the systemd service and journal first:
+
+```sh
+sudo systemctl is-enabled commuter-temporal-worker.service
+sudo systemctl is-active commuter-temporal-worker.service
+sudo systemctl status --no-pager commuter-temporal-worker.service
+sudo journalctl -u commuter-temporal-worker.service -n 100 --no-pager
+```
+
+Then start a `processStravaEvent` workflow manually in Temporal with a known
+activity, its real connected athlete ID, and task queue `commuter-strava`. Once
+that succeeds, test the Cloudflare puller before relying on the Strava
+subscription: in **Workers & Pages → Queues → commuter → Messages → Send**,
+choose **Text** and send a valid `update` event for that same already-imported
+activity. Use the current Unix timestamp and real numeric activity/athlete IDs.
+Confirm the queue backlog drains, Temporal shows a completed workflow, the
+service stays active, and the existing activity row is updated rather than
+duplicated. Then stop the service, enqueue one more safe test message, confirm
+it remains pending, start the service, and verify it is processed. Queue
+delivery is at-least-once: stable workflow IDs and idempotent sheet upserts
+handle redelivery if the process stops between workflow start and message
+acknowledgement. The Temporal activity validates event ownership against the
+local database.
 
 Useful service commands:
 

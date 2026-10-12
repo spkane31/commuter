@@ -236,9 +236,12 @@ async def run_cloudflare_queue_poller(temporal_client: Client) -> None:
                 else:
                     await asyncio.sleep(poll_interval)
             except Exception as error:  # noqa: BLE001 - polling must survive transient HTTP/client failures.
-                logger.warning(
-                    "Cloudflare Queue polling failed (%s)", type(error).__name__
-                )
+                if isinstance(error, CloudflareQueueError):
+                    logger.warning("Cloudflare Queue polling failed: %s", error)
+                else:
+                    logger.warning(
+                        "Cloudflare Queue polling failed (%s)", type(error).__name__
+                    )
                 await asyncio.sleep(poll_interval)
 
 

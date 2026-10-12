@@ -1,4 +1,6 @@
+import asyncio
 import json
+import logging
 from dataclasses import dataclass
 
 import httpx
@@ -7,8 +9,10 @@ from temporalio.exceptions import WorkflowAlreadyStartedError
 
 from commuter.temporal_queue import (
     CloudflareQueueClient,
+    CloudflareQueueError,
     PulledQueueMessage,
     dispatch_queue_messages,
+    run_cloudflare_queue_poller,
     workflow_id_for_event,
 )
 
@@ -149,3 +153,30 @@ async def test_http_ack_sends_acknowledgement_and_delayed_retry():
         "acks": [{"lease_id": "lease-a"}],
         "retries": [{"lease_id": "lease-b", "delay_seconds": 13}],
     }
+
+
+@pytest.mark.asyncio
+async def test_poller_logs_safe_cloudflare_status_detail(monkeypatch, caplog):
+    monkeypatch.setenv("CLOUDFLARE_ACCOUNT_ID", "account-1")
+    monkeypatch.setenv("CLOUDFLARE_QUEUE_ID", "queue-1")
+    monkeypatch.setenv("CLOUDFLARE_API_TOKEN", "test-token")
+
+    async def fail_pull(self):
+        raise CloudflareQueueError("Cloudflare Queue request failed (HTTP 403)")
+
+    async def stop_after_first_failure(_delay):
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(CloudflareQueueClient, "pull", fail_pull)
+    monkeypatch.setattr(
+        "commuter.temporal_queue.asyncio.sleep", stop_after_first_failure
+    )
+
+    with (
+        caplog.at_level(logging.WARNING, logger="commuter.temporal_queue"),
+        pytest.raises(asyncio.CancelledError),
+    ):
+        await run_cloudflare_queue_poller(FakeTemporalClient())
+
+    assert "HTTP 403" in caplog.text
+    assert "test-token" not in caplog.text
